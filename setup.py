@@ -10,6 +10,7 @@ setup(
         "numpy",
         "pandas",
         "polars",
+        "pyarrow",
         "FinMind",
         "shioaji",
         "requests",

@@ -176,3 +176,30 @@ class ShioajiWrapper:
             for contract in product:
                 rows.append({f: getattr(contract, f, None) for f in fields})
         return pd.DataFrame(rows, columns=fields)
+
+    def get_stock_contracts(self) -> pd.DataFrame:
+        """One row per listed stock, across every exchange (TSE, OTC, OES).
+
+        Columns: code, name, exchange, category, reference, limit_up,
+        limit_down, day_trade, unit.
+
+        The three price columns come straight from the exchange's contract
+        file, so ``reference`` already reflects ex-rights / ex-dividend
+        adjustments, disposal-period resets and new listings, and
+        ``limit_up`` / ``limit_down`` are the exchange's own ceiling and
+        floor, not a locally computed ``reference * 1.10``. Shioaji
+        downloads the contract file at login, so this is available all day,
+        unlike the pre-open-only UDP reference-price broadcast.
+
+        Not for a request path: call it once per morning and persist the
+        frame.
+        """
+        self._ensure_contracts_fetched()
+
+        fields = ["code", "name", "exchange", "category", "reference",
+                  "limit_up", "limit_down", "day_trade", "unit"]
+        rows = []
+        for exchange in ShioajiWrapper._api.Contracts.Stocks:
+            for contract in exchange:
+                rows.append({f: getattr(contract, f, None) for f in fields})
+        return pd.DataFrame(rows, columns=fields)
