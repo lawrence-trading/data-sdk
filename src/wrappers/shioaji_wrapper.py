@@ -181,7 +181,8 @@ class ShioajiWrapper:
         """One row per listed stock, across every exchange (TSE, OTC, OES).
 
         Columns: code, name, exchange, category, reference, limit_up,
-        limit_down, day_trade, unit.
+        limit_down, day_trade, unit, margin_trading_balance,
+        short_selling_balance, update_date.
 
         The three price columns come straight from the exchange's contract
         file, so ``reference`` already reflects ex-rights / ex-dividend
@@ -191,13 +192,28 @@ class ShioajiWrapper:
         downloads the contract file at login, so this is available all day,
         unlike the pre-open-only UDP reference-price broadcast.
 
+        ``margin_trading_balance`` / ``short_selling_balance`` are the
+        contract file's 融資 / 融券 figures, stamped by ``update_date``
+        (the contract file's own as-of date). Whether they carry the
+        *outstanding balance* (餘額) or the *remaining quota* (限額 minus
+        餘額) is unverified: no consumer has compared them against a public
+        table yet. They are passed through untouched under SinoPac's field
+        names; a consumer must reconcile them against FinLab
+        ``margin_transactions:融資今日餘額`` / ``融券今日餘額`` for the same
+        ``update_date`` before trusting either reading.
+
+        ``day_trade`` (``Yes`` / ``No`` / ``OnlyBuy``) is only meaningful
+        once the exchange has published the day's flags, after 08:30 Taipei.
+
         Not for a request path: call it once per morning and persist the
         frame.
         """
         self._ensure_contracts_fetched()
 
         fields = ["code", "name", "exchange", "category", "reference",
-                  "limit_up", "limit_down", "day_trade", "unit"]
+                  "limit_up", "limit_down", "day_trade", "unit",
+                  "margin_trading_balance", "short_selling_balance",
+                  "update_date"]
         rows = []
         for exchange in ShioajiWrapper._api.Contracts.Stocks:
             for contract in exchange:

@@ -12,6 +12,7 @@ setup(
         "polars",
         "pyarrow",
         "FinMind",
+        "finlab",
         "shioaji",
         "requests",
         "tejapi",

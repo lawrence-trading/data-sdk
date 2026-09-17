@@ -80,13 +80,18 @@ export DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH="/mnt/nfs/backup/shioaji_futures_tick
 export DATA_SDK_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/parquets"
 export DATA_SDK_TEJ_CACHE_PATH="/mnt/nfs/backup/tej_cache"
 export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"  # defaults to this path if unset
+export DATA_SDK_FINLAB_CACHE_PATH="/mnt/nfs/backup/finlab_cache"    # defaults to this path if unset
+export DATA_SDK_TAIFEX_CACHE_PATH="/mnt/nfs/backup/taifex_cache"    # defaults to this path if unset
 ```
 
 ### API Keys
-Required for fetching data from FinMind, Shioaji and TEJ.
+Required for fetching data from FinMind, FinLab, Shioaji and TEJ. A wrapper
+whose cache already holds the requested day never needs one; the TAIFEX
+endpoints are public and need none at all.
 
 ```bash
 export FINMIND_API_TOKEN=your_token
+export FINLAB_API_TOKEN=your_finlab_token
 export SHIOAJI_API_KEY=your_api_key
 export SHIOAJI_SECRET_KEY=your_secret_key
 export TEJ_API_TOKEN=your_tej_token
@@ -108,8 +113,10 @@ export DATA_SDK_FINMIND_RATE_MARGIN=0.7   # fraction of the quota actually used
 
 ```python
 from data_sdk import (
+    FinLabWrapper,
     FinMindWrapper,
     ShioajiWrapper,
+    TaifexWrapper,
     TEJWrapper,
     WarrantInfoWrapper,
     get_fop_order_book,
@@ -117,6 +124,7 @@ from data_sdk import (
     get_order_book_odd_lots,
     get_order_book_stocks,
     get_order_book_warrant,
+    get_ssf_decimal_locator,
 )
 from pathlib import Path
 
@@ -137,6 +145,35 @@ if result.complete:
 # Get Shioaji order book data (downloads if missing)
 shioaji = ShioajiWrapper()
 df_ticks = shioaji.get_order_book("2024-01-02", "2330")
+
+# Listed stocks with the exchange's reference / limit prices plus SinoPac's
+# margin_trading_balance / short_selling_balance stamped update_date. Whether
+# those two balances are the outstanding balance or the remaining quota is
+# unverified: reconcile against FinLab before trusting either.
+stocks = shioaji.get_stock_contracts()
+
+# Trading calendar through the furthest listed delivery month (never a fixed
+# 90-day window): the range is derived from the contracts themselves.
+contracts = shioaji.get_futures_contracts()
+calendar = finmind.get_trading_dates_covering("2026-09-17", contracts["delivery_date"])
+
+# FinLab SSF reference columns for the last completed trading day (strictly
+# before today). The four tables must share one report_date or this raises
+# FinLabAlignmentError. Cached per query day; a warm day needs no token.
+report_date, ref = FinLabWrapper().get_ssf_reference()
+ref.loc["2330", ["margin_balance", "short_balance", "lending_balance", "day_trade_sell_first"]]
+
+# TAIFEX public endpoints, cached under the day each payload carries. Prices
+# come back as the published strings; prod_id is derived for the i024 join.
+taifex = TaifexWrapper()
+report = taifex.get_daily_market_report_fut()           # TradingSession == '一般'
+adjusted = taifex.get_ssf_adjusted_info()                # 調整型 stock futures
+as_of, paused = taifex.get_ssf_trade_pause()             # 商品類別 == '股票期貨'
+
+# Frozen per-product decimal locator and tick (PLAN_SSF.md 8.1). None means
+# the product was never calibrated: render it as unknown, never guess.
+entry = get_ssf_decimal_locator("CDFI6")
+price_1e4 = 239000 * 10 ** (4 - entry.locator)         # 1/10000 NTD, integers only
 
 # Get Shioaji futures ticks (downloads if missing; code = product, continuous
 # near-month alias, or month symbol)

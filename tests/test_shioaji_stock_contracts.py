@@ -16,11 +16,13 @@ from data_sdk.wrappers.shioaji_wrapper import ShioajiWrapper
 
 
 EXPECTED_COLUMNS = ["code", "name", "exchange", "category", "reference",
-                    "limit_up", "limit_down", "day_trade", "unit"]
+                    "limit_up", "limit_down", "day_trade", "unit",
+                    "margin_trading_balance", "short_selling_balance",
+                    "update_date"]
 
 
 class _FakeStock:
-    """Attribute bag with the same field names as shioaji.contracts.Stock."""
+    """Attribute bag with the same field names as shioaji.Stock."""
 
     def __init__(self, **fields):
         for k, v in fields.items():
@@ -90,7 +92,7 @@ def _sample_stocks():
     return _FakeStocks([tse, otc, oes])
 
 
-def test_one_row_per_stock_with_nine_columns(wrapper, monkeypatch):
+def test_one_row_per_stock_with_twelve_columns(wrapper, monkeypatch):
     monkeypatch.setattr(ShioajiWrapper, "_api", _fake_api(_sample_stocks()))
 
     df = wrapper.get_stock_contracts()
@@ -126,7 +128,8 @@ def test_missing_field_becomes_none(wrapper, monkeypatch):
     row = df.iloc[0]
     assert row["code"] == "0050"
     for col in ("category", "reference", "limit_up", "limit_down",
-                "day_trade", "unit"):
+                "day_trade", "unit", "margin_trading_balance",
+                "short_selling_balance", "update_date"):
         assert row[col] is None
 
 
@@ -156,6 +159,23 @@ def test_smoke_runs_without_any_token_in_environment(wrapper, monkeypatch):
     monkeypatch.setattr(ShioajiWrapper, "_api", _fake_api(_sample_stocks()))
 
     assert len(wrapper.get_stock_contracts()) == 4
+
+
+def test_balance_fields_are_passed_through_untouched(wrapper, monkeypatch):
+    """The two 融資/融券 figures and their as-of stamp reach the frame under
+    SinoPac's own field names, with no rescaling and no interpretation."""
+    stocks = _FakeStocks([[_FakeStock(code="2330", name="台積電", exchange="TSE",
+                                      margin_trading_balance=12345,
+                                      short_selling_balance=678,
+                                      day_trade="Yes",
+                                      update_date="2026/09/16")]])
+    monkeypatch.setattr(ShioajiWrapper, "_api", _fake_api(stocks))
+
+    row = wrapper.get_stock_contracts().iloc[0]
+
+    assert row["margin_trading_balance"] == 12345
+    assert row["short_selling_balance"] == 678
+    assert row["update_date"] == "2026/09/16"
 
 
 def test_stock_contract_model_carries_the_three_price_fields():

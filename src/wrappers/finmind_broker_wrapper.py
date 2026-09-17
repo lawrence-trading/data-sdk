@@ -145,11 +145,43 @@ class FinMindWrapper:
         Thin accessor over FinMind's ``taiwan_stock_trading_date`` dataset so
         consumers never reach the underlying DataLoader directly. Returns the
         DataLoader's DataFrame (a ``date`` column of ``YYYY-MM-DD`` strings).
+
+        A consumer counting remaining trading days to a futures 最後結算日
+        must not pick a fixed window: the furthest listed delivery month can
+        be nine months out. Use ``get_trading_dates_covering`` with the
+        contracts' delivery dates so the range ends past the furthest one.
         """
         self.limiter().acquire(1)
         return FinMindWrapper._api.taiwan_stock_trading_date(
             start_date=start_date, end_date=end_date
         )
+
+    @staticmethod
+    def calendar_range_covering(start_date, delivery_dates, margin_days=7):
+        """``(start, end)`` for a calendar that covers every delivery date.
+
+        ``delivery_dates`` are ``YYYY/MM/DD`` / ``YYYY-MM-DD`` strings or
+        dates (``ShioajiWrapper.get_futures_contracts()['delivery_date']``);
+        the end is the furthest of them plus ``margin_days``, and never
+        earlier than ``start_date``. Raises ValueError on an empty input, so
+        an empty contract list can never shrink the range to one day.
+        """
+        parsed = pd.to_datetime(pd.Series(list(delivery_dates)), errors="coerce")
+        parsed = parsed.dropna()
+        if parsed.empty:
+            raise ValueError("no delivery dates to cover")
+        start = pd.Timestamp(start_date).normalize()
+        end = max(parsed.max().normalize() + pd.Timedelta(days=margin_days), start)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    def get_trading_dates_covering(self, start_date, delivery_dates, margin_days=7):
+        """Trading calendar from ``start_date`` past the furthest delivery date.
+
+        The §8.5 rule for 剩餘交易日: the range is derived from the listed
+        contracts, so a nine-month-out delivery month is always inside it.
+        """
+        start, end = self.calendar_range_covering(start_date, delivery_dates, margin_days)
+        return self.get_trading_dates(start, end)
 
     # ------------------------------------------------------------------
     # Fetch surface -- used by the scheduled writer and the archive repair.

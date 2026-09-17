@@ -3,6 +3,7 @@ numpy
 pandas
 polars
 FinMind
+finlab
 shioaji
 requests
 tejapi

@@ -12,7 +12,7 @@ _FOP_TYPES = {
     "options": "options",
     "option": "options",
 }
-_FOP_FORMATS = ("i024", "i081", "i083", "i084")
+_FOP_FORMATS = ("i024", "i025", "i081", "i083", "i084")
 _FOP_SESSION_TOKENS = {"day": "0840", "night": "1455"}
 
 
@@ -31,13 +31,19 @@ def get_fop_parquet(
     """Load a raw TAIFEX futures/options (FOP) market-data parquet for a given day.
 
     Parquet path is taken from DATA_SDK_FOP_PARQUET_PATH (default /mnt/nfs/backup/fop_parquets).
-    Files are named {futures|options}_{day|night}_YYYYMMDD_{0840|1455}_{i024|i081|i083}.parquet;
+    Files are named {futures|options}_{day|night}_YYYYMMDD_{0840|1455}_{i024|i025|i081|i083}.parquet;
     i084 files use a snapshot infix: {futures|options}_{day|night}_snapshot_YYYYMMDD_{0840|1455}_i084.parquet.
 
     Formats:
         i024: deal (match) messages; multi-level sweeps expand to one row per leg
               (match_index 0..total_match_count-1); total_qty/buy_cnt/sell_cnt are
               session-cumulative; calculated_flag '1' marks pre-open trial matches.
+        i025: per-product day high / day low updates (day_high_price_raw and
+              day_low_price_raw, each signed by its *_sign column; show_time is
+              the exchange display clock). Carries no book or deal data, but it
+              consumes the same per-product prod_msg_seq serial as i024/i081/i083,
+              so a sequence-continuity check must count it. Captured from
+              2026-07-31 onward.
         i081: order-book deltas; update_action NEW/CHG/DEL on entry_type BID/ASK
               (price_level 1-5), OVE overlays the best implied level on
               IMPL_BID/IMPL_ASK; apply entries in (channel_seq, entry_index) order.
@@ -59,15 +65,16 @@ def get_fop_parquet(
           product's natural units.
         - Rows are in arrival order without dedup; sort by (channel_seq, entry_index)
           defensively before sequential processing.
-        - prod_msg_seq counts I024/I025/I081/I083 per product; I025 is not captured,
-          so per-product sequence gaps are expected and usually benign.
+        - prod_msg_seq counts I024/I025/I081/I083 per product. i025 captures
+          exist from 2026-07-31 onward; before that, per-product sequence gaps
+          at every I025 are expected and benign.
         - i081/i084 files are large (750 MB - 1.1 GB); prefer lazy=True so filters
           and projections are pushed down to the parquet scan.
 
     Args:
         day: Trading day, e.g. "2026-07-03" or "20260703".
         type: "futures" or "options" (singular forms accepted).
-        format: One of "i024", "i081", "i083", "i084".
+        format: One of "i024", "i025", "i081", "i083", "i084".
         session: "day" (0840 files) or "night" (1455 files).
         instrument: Product id (prod_id), e.g. "TXFG6". If None, returns all products.
         lazy: If True, return a polars LazyFrame; otherwise collect and return pandas DataFrame.

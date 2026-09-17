@@ -5,7 +5,7 @@ key; the wrapper logs in with simulation=True). Nothing else: no FinLab
 token, no DATA_SDK_* paths.
 
 Verifies, on the exchange's own contract file:
-  1. one row per listed stock with the nine expected columns;
+  1. one row per listed stock with the twelve expected columns;
   2. reference / limit_up / limit_down are non-null for a liquid name;
   3. across every TWSE tick band, limit_up == limit_up_price(reference) and
      limit_down == limit_down_price(reference) from
@@ -29,7 +29,9 @@ import pandas as pd
 from data_sdk import ShioajiWrapper
 
 EXPECTED_COLUMNS = ["code", "name", "exchange", "category", "reference",
-                    "limit_up", "limit_down", "day_trade", "unit"]
+                    "limit_up", "limit_down", "day_trade", "unit",
+                    "margin_trading_balance", "short_selling_balance",
+                    "update_date"]
 
 # TWSE tick bands by price: (lower bound inclusive, upper bound exclusive).
 TICK_BANDS = [
