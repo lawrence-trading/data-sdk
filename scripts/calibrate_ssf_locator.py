@@ -1,4 +1,7 @@
-"""Calibrate the per-product decimal locator and tick (PLAN_SSF.md §8.1).
+"""Calibrate the per-product decimal locator and tick.
+
+The spec is ssf_dashboard/docs/spec.md §8.1 in the taiwan_dashboard monorepo
+that consumes this SDK.
 
 Joins TAIFEX ``DailyMarketReportFut`` (``TradingSession == '一般'``) to the
 archived ``futures_day_<YYYYMMDD>_0840_i024.parquet`` on

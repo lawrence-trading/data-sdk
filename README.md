@@ -170,8 +170,9 @@ report = taifex.get_daily_market_report_fut()           # TradingSession == '一
 adjusted = taifex.get_ssf_adjusted_info()                # 調整型 stock futures
 as_of, paused = taifex.get_ssf_trade_pause()             # 商品類別 == '股票期貨'
 
-# Frozen per-product decimal locator and tick (PLAN_SSF.md 8.1). None means
-# the product was never calibrated: render it as unknown, never guess.
+# Frozen per-product decimal locator and tick (ssf_dashboard/docs/spec.md §8.1
+# in the taiwan_dashboard monorepo). None means the product was never
+# calibrated: render it as unknown, never guess.
 entry = get_ssf_decimal_locator("CDFI6")
 price_1e4 = 239000 * 10 ** (4 - entry.locator)         # 1/10000 NTD, integers only
 
