@@ -151,6 +151,11 @@ df_ticks = shioaji.get_order_book("2024-01-02", "2330")
 # those two balances are the outstanding balance or the remaining quota is
 # unverified: reconcile against FinLab before trusting either.
 stocks = shioaji.get_stock_contracts()
+# examples/check_stock_contracts.py checks those limits live against the tick
+# ladder in exact decimal. Run on 2026-09-23 over 1978 ordinary stocks with a
+# band: limit_up agreed on every one in every tick band; limit_down disagreed
+# on one (1595 川寶, reference 74.1: the exchange published 66.8, the rule
+# gives 66.7). The exchange's figure is the one to use; never recompute it.
 
 # Trading calendar through the furthest listed delivery month (never a fixed
 # 90-day window): the range is derived from the contracts themselves.

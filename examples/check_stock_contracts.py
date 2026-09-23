@@ -7,10 +7,20 @@ token, no DATA_SDK_* paths.
 Verifies, on the exchange's own contract file:
   1. one row per listed stock with the twelve expected columns;
   2. reference / limit_up / limit_down are non-null for a liquid name;
-  3. across every TWSE tick band, limit_up == limit_up_price(reference) and
-     limit_down == limit_down_price(reference) from
-     intraday_short_research/common/pricing.py, so a mismatch pins down
-     either a wrong tick ladder or a wrong reference.
+  3. across every TWSE tick band, for every ordinary listed stock that has a
+     price band today, limit_up is the largest ladder price <= reference x 1.1
+     and limit_down the smallest ladder price >= reference x 0.9, computed in
+     exact decimal on the unbounded ladder, so a mismatch pins down either a
+     wrong tick ladder or a wrong reference.
+
+Ordinary means a four-digit code on TSE or OTC. 興櫃 (Exchange.OES) has no
+price band, and a listing without a band today carries the exchange's
+sentinel limits (limit_up 9995 / 9999.95, limit_down 0.01); both are left out.
+
+intraday_short_research/common/pricing.py is compared as well and its
+disagreements are printed, not failed: its ladder stops at 4995 and its
+limit_down rounds a float product, so it is one tick high whenever
+reference x 0.9 lands exactly on a tick (54.5 -> 49.10 instead of 49.05).
 
 Usage:
     .venv/bin/python submodules/data-sdk/examples/check_stock_contracts.py \
@@ -22,6 +32,7 @@ Exit status is 0 when every check passes, 1 otherwise.
 import argparse
 import importlib.util
 import sys
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -43,8 +54,46 @@ TICK_BANDS = [
     (">=1000", 1000.0, float("inf")),
 ]
 
+# The ladder itself: (band lower bound inclusive, tick), open-ended above.
+LADDER = [
+    (Decimal("0"), Decimal("0.01")),
+    (Decimal("10"), Decimal("0.05")),
+    (Decimal("50"), Decimal("0.1")),
+    (Decimal("100"), Decimal("0.5")),
+    (Decimal("500"), Decimal("1")),
+    (Decimal("1000"), Decimal("5")),
+]
+
+# The exchange's "no price band today" limits.
+NO_BAND_UP = (9995.0, 9999.95)
+NO_BAND_DOWN = 0.01
+
 DEFAULT_PRICING = (Path(__file__).resolve().parents[2]
                    / "intraday_short_research" / "common" / "pricing.py")
+
+
+def _tick_at(price: Decimal) -> Decimal:
+    tick = LADDER[0][1]
+    for lower, step in LADDER:
+        if price >= lower:
+            tick = step
+    return tick
+
+
+def exact_limit_up(reference: float) -> float:
+    """The largest ladder price not above reference x 1.1."""
+    target = Decimal(str(reference)) * Decimal("1.1")
+    tick = _tick_at(target)
+    # Every band's lower bound is a multiple of its own tick, so flooring on
+    # the tick in force at the target never leaves the target's band.
+    return float((target / tick).to_integral_value(ROUND_FLOOR) * tick)
+
+
+def exact_limit_down(reference: float) -> float:
+    """The smallest ladder price not below reference x 0.9."""
+    target = Decimal(str(reference)) * Decimal("0.9")
+    tick = _tick_at(target)
+    return float((target / tick).to_integral_value(ROUND_CEILING) * tick)
 
 
 def load_pricing(path: Path):
@@ -101,14 +150,29 @@ def main() -> int:
     # listing in its first sessions); there is nothing to compare against.
     prices = prices[prices["reference"] > 0].dropna(
         subset=["reference", "limit_up", "limit_down"])
-    print(f"{len(prices)} rows with a positive reference and both limits")
+    exchange = prices["exchange"].astype(str)
+    ordinary = (exchange.isin(["Exchange.TSE", "Exchange.OTC"])
+                & prices["code"].astype(str).str.fullmatch(r"[1-9]\d{3}"))
+    no_band = (prices["limit_up"].isin(NO_BAND_UP)
+               | (prices["limit_down"] == NO_BAND_DOWN))
+    print(f"{len(prices)} rows with a positive reference and both limits; "
+          f"{int((ordinary & no_band).sum())} ordinary stocks without a band today")
+    prices = prices[ordinary & ~no_band].copy()
+    print(f"{len(prices)} ordinary stocks with a price band")
 
-    prices["expect_up"] = pricing.limit_up_price(prices["reference"])
-    prices["expect_down"] = pricing.limit_down_price(prices["reference"])
+    prices["expect_up"] = prices["reference"].map(exact_limit_up)
+    prices["expect_down"] = prices["reference"].map(exact_limit_down)
     # Contract prices are centi-NTD floats; compare with half-tick slack.
     prices["up_ok"] = (prices["limit_up"] - prices["expect_up"]).abs() < 0.005
     prices["down_ok"] = (
         prices["limit_down"] - prices["expect_down"]).abs() < 0.005
+
+    research_up = pricing.limit_up_price(prices["reference"])
+    research_down = pricing.limit_down_price(prices["reference"])
+    research_off = prices[((prices["limit_up"] - research_up).abs() >= 0.005)
+                          | ((prices["limit_down"] - research_down).abs() >= 0.005)]
+    print(f"pricing.py disagrees with the exchange on {len(research_off)} of "
+          f"{len(prices)} (informational; see the module docstring)")
 
     for label, lo, hi in TICK_BANDS:
         band = prices[(prices["reference"] >= lo) & (prices["reference"] < hi)]
