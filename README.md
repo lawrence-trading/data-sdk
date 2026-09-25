@@ -82,6 +82,7 @@ export DATA_SDK_TEJ_CACHE_PATH="/mnt/nfs/backup/tej_cache"
 export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"  # defaults to this path if unset
 export DATA_SDK_FINLAB_CACHE_PATH="/mnt/nfs/backup/finlab_cache"    # defaults to this path if unset
 export DATA_SDK_TAIFEX_CACHE_PATH="/mnt/nfs/backup/taifex_cache"    # defaults to this path if unset
+export DATA_SDK_MARKET_CALENDAR_CACHE_PATH="$HOME/.cache/data_sdk/market_calendar"  # default: $XDG_CACHE_HOME/data_sdk/market_calendar, else ~/.cache/data_sdk/market_calendar
 ```
 
 ### API Keys
@@ -123,6 +124,7 @@ export DATA_SDK_FINMIND_RATE_MARGIN=0.7   # fraction of the quota actually used
 from data_sdk import (
     FinLabWrapper,
     FinMindWrapper,
+    MarketCalendar,
     ShioajiWrapper,
     TaifexWrapper,
     TEJWrapper,
@@ -182,6 +184,16 @@ taifex = TaifexWrapper()
 report = taifex.get_daily_market_report_fut()           # TradingSession == '一般'
 adjusted = taifex.get_ssf_adjusted_info()                # 調整型 stock futures
 as_of, paused = taifex.get_ssf_trade_pause()             # 商品類別 == '股票期貨'
+
+# TWSE's published market calendar (開休市日期), cached one JSON file per year.
+# is_trading_day/closure read a Sat/Sun-closed weekday rule overridden by
+# TWSE's announced exceptions; a year TWSE has not published yet raises
+# UnknownCalendarYear instead of silently treating every weekday as open.
+calendar = MarketCalendar()
+calendar.is_trading_day("2026-09-25")       # False (中秋節)
+calendar.closure("2026-09-25")              # "中秋節"; None on a trading day
+calendar.next_trading_day("2026-09-25")     # "2026-09-29"
+calendar.export_range("2026-09-25", "2026-09-29")  # [{"date", "trading_day", "closure"}, ...]
 
 # Frozen per-product decimal locator and tick (ssf_dashboard/docs/spec.md §8.1
 # in the taiwan_dashboard monorepo). None means the product was never
