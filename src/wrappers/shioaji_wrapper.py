@@ -1,4 +1,5 @@
 import os
+import tempfile
 import time
 import pandas as pd
 import shioaji as sj
@@ -8,6 +9,9 @@ import sys
 class ShioajiWrapper:
     _api = None
     _ref_count = 0
+    # This process's own contract-cache directory (see _ensure_api); it lives
+    # until the interpreter exits, so every login in the process shares it.
+    _contracts_cache = None
     # Max wait for Shioaji's contract-file download, in seconds.
     _CONTRACTS_FETCH_TIMEOUT_S = 60
 
@@ -30,6 +34,18 @@ class ShioajiWrapper:
         # paper-only, so a production login is rejected outright with
         # "Token doesn't have production permission". NB: were this wrapper
         # ever to place real orders, they would route to the paper endpoint.
+        # Shioaji keeps its contract file in a cache directory, and once it has
+        # written one on a given day, later logins that day reuse it without
+        # asking the server: a file the exchange publishes after that is never
+        # seen, and 參考價 / 漲停價 stay the previous day's. Unless the caller
+        # set SJ_CONTRACTS_PATH itself, this process points it at an empty
+        # directory of its own before its first login, so a process sees the
+        # server's contract file as of that first login; later logins in the
+        # same process reuse what it downloaded.
+        if not os.environ.get("SJ_CONTRACTS_PATH"):
+            if cls._contracts_cache is None:
+                cls._contracts_cache = tempfile.TemporaryDirectory(prefix="data-sdk-shioaji-contracts-")
+            os.environ["SJ_CONTRACTS_PATH"] = cls._contracts_cache.name
         api = sj.Shioaji(simulation=True)
         api.login(
             api_key=os.environ.get("SHIOAJI_API_KEY"),

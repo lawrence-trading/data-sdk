@@ -97,6 +97,14 @@ export SHIOAJI_SECRET_KEY=your_secret_key
 export TEJ_API_TOKEN=your_tej_token
 ```
 
+### Shioaji contract cache
+Shioaji reuses a contract file it already cached that day without asking the
+server again, so a file published later that day (today's 參考價 / 漲停價)
+would never be seen. Unless `SJ_CONTRACTS_PATH` is already set, `ShioajiWrapper`
+points it at an empty directory of the process's own before the first login;
+a process therefore sees the server's contract file as of its first login, and
+the directory is removed when the process exits.
+
 ### FinMind Rate Limiting
 FinMind answers HTTP 402 once the hourly quota is gone, and its async client
 drops the failed requests silently. Every FinMind caller draws from one token

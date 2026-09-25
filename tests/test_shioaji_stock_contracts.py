@@ -184,3 +184,66 @@ def test_stock_contract_model_carries_the_three_price_fields():
     the wrapper reads, so the column mapping is one-to-one with no rename."""
     exposed = set(dir(sj.Stock))
     assert set(EXPECTED_COLUMNS) <= exposed
+
+
+class _RecordingClient:
+    """A stand-in for sj.Shioaji that records the contract cache it logs in with."""
+
+    seen = []
+
+    def __init__(self, simulation):
+        self.Contracts = types.SimpleNamespace(status=sj.FetchStatus.Fetched, Stocks=_FakeStocks([]), Futures=_FakeStocks([]))
+
+    def login(self, **kwargs):
+        path = os.environ.get("SJ_CONTRACTS_PATH")
+        exists = path is not None and os.path.isdir(path)
+        _RecordingClient.seen.append((path, exists and not os.listdir(path)))
+
+    def logout(self):
+        pass
+
+
+@pytest.fixture
+def recording_login(monkeypatch, no_credentials):
+    _RecordingClient.seen = []
+    before = os.environ.get("SJ_CONTRACTS_PATH")
+    monkeypatch.setattr(sj, "Shioaji", _RecordingClient)
+    monkeypatch.setattr(ShioajiWrapper, "_api", None)
+    monkeypatch.setattr(ShioajiWrapper, "_ref_count", 0)
+    monkeypatch.setattr(ShioajiWrapper, "_contracts_cache", None)
+    yield _RecordingClient.seen
+    ShioajiWrapper._api = None
+    if before is None:
+        os.environ.pop("SJ_CONTRACTS_PATH", None)
+    else:
+        os.environ["SJ_CONTRACTS_PATH"] = before
+
+
+def test_the_first_login_downloads_contracts_into_an_empty_cache_of_its_own(recording_login, monkeypatch):
+    # A cache Shioaji wrote earlier the same day is reused without asking the
+    # server, so a process's first login must never see one.
+    monkeypatch.delenv("SJ_CONTRACTS_PATH", raising=False)
+    ShioajiWrapper().get_stock_contracts()
+    (path, empty), = recording_login
+    assert empty and path == os.environ["SJ_CONTRACTS_PATH"]
+    assert path != os.path.expanduser("~/.shioaji")
+
+
+def test_every_login_in_a_process_shares_its_one_cache(recording_login, monkeypatch):
+    # Construct-and-drop logs out between the two calls; the second login must
+    # not download into yet another directory.
+    monkeypatch.delenv("SJ_CONTRACTS_PATH", raising=False)
+    ShioajiWrapper().get_futures_contracts()
+    ShioajiWrapper().get_stock_contracts()
+    first, second = recording_login
+    assert first[0] == second[0] and os.path.isdir(first[0])
+
+
+def test_a_caller_chosen_contract_cache_is_left_alone(recording_login, monkeypatch, tmp_path):
+    monkeypatch.setenv("SJ_CONTRACTS_PATH", str(tmp_path))
+    w = ShioajiWrapper()
+    w.get_stock_contracts()
+    assert recording_login == [(str(tmp_path), True)]
+    del w
+    assert tmp_path.is_dir() and os.environ["SJ_CONTRACTS_PATH"] == str(tmp_path)
+    assert ShioajiWrapper._contracts_cache is None
