@@ -11,6 +11,7 @@ from .fop_wrapper import get_fop_parquet, get_fop_order_book
 from .finlab_wrapper import FinLabWrapper, FinLabAlignmentError
 from .taifex_wrapper import TaifexWrapper, taifex_prod_id
 from .market_calendar import MarketCalendar, HolidayEntry, UnknownCalendarYear
+from .disposition import DispositionList, DispositionEntry
 from .ssf_decimal_locator import (
     LocatorEntry,
     get_ssf_decimal_locator,
@@ -36,6 +37,8 @@ __all__ = [
     "MarketCalendar",
     "HolidayEntry",
     "UnknownCalendarYear",
+    "DispositionList",
+    "DispositionEntry",
     "LocatorEntry",
     "get_ssf_decimal_locator",
     "price_raw_to_1e4",
