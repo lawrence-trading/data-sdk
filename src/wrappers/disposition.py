@@ -1,21 +1,38 @@
 """TWSE's 公布處置有價證券 and TPEx's 處置有價證券 open data: today's 處置股.
 
-TWSE  https://www.twse.com.tw/rwd/zh/announcement/punish?response=json
-       the same "fields"-indexed shape as holidaySchedule; the columns that
-       matter here are 證券代號, 證券名稱 and 處置起迄時間 (ROC, e.g.
-       "115/09/18～115/09/30").
+TWSE  https://openapi.twse.com.tw/v1/announcement/punish
+       TWSE's Open API: a plain JSON array of objects. The columns that
+       matter here are ``Code``, ``Name`` and ``DispositionPeriod`` (ROC,
+       e.g. "115/09/18～115/09/30"). Every currently-effective disposition
+       is on this list, not just ones newly announced today -- the
+       ``www.twse.com.tw/rwd/...`` page endpoint returns the same rows in a
+       "fields"-indexed shape, but as an internal page endpoint (not part of
+       TWSE's documented Open API) it is not relied on here.
 TPEx   https://www.tpex.org.tw/openapi/v1/tpex_disposal_information
        a plain JSON array of objects: SecuritiesCompanyCode, CompanyName and
        DispositionPeriod (ROC, e.g. "1150924~1151006", no slashes).
 
-No credential is involved. Fetched at most once per calendar date and cached
-under DATA_SDK_DISPOSITION_CACHE_PATH (default
+Both are plain JSON arrays keyed by different field names, parsed by the
+same row parser below. Either can list the same code more than once when it
+has been placed under disposition more than once with overlapping windows
+(TPEx does this in practice) -- ``entries()``/``effective_on()`` return
+every row as announced and leave merging duplicate codes to the caller
+(``backend.app.preopen.disposition.normalize``, which keeps the widest
+covering window per code).
+
+No credential is involved. Fetched at most once per calendar date and
+cached under DATA_SDK_DISPOSITION_CACHE_PATH (default
 ``$XDG_CACHE_HOME/data_sdk/disposition``, ``~/.cache/...`` when unset) the
 same way MarketCalendar caches a year: the raw response from each exchange,
-untouched, so a second call for the same date never touches the network.
-Either exchange's fetch failing raises -- this module never returns a partial
-list silently. Callers (backend.app.preopen) decide how to degrade and say
-so; DispositionList itself makes no such decision.
+untouched, alongside the URLs and a schema version that produced it. A
+cached file whose URLs or schema do not match the current constants (an
+endpoint moved, or the cached shape predates a parsing change) is treated
+as absent and re-fetched, so changing either URL below always gets a fresh
+answer on its first call of the day instead of silently replaying a stale
+or foreign-shaped cache. Either exchange's fetch failing raises -- this
+module never returns a partial list silently. Callers (backend.app.preopen)
+decide how to degrade and say so; DispositionList itself makes no such
+decision.
 """
 
 import datetime as dt
@@ -29,9 +46,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-TWSE_PUNISH_URL = "https://www.twse.com.tw/rwd/zh/announcement/punish?response=json"
+TWSE_PUNISH_URL = "https://openapi.twse.com.tw/v1/announcement/punish"
 TPEX_DISPOSAL_URL = "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information"
 REQUEST_TIMEOUT_S = 30
+
+# Bumped whenever the cached payload's shape or source URLs change, so a
+# cache written by an older version of this module is never replayed as-is.
+_CACHE_SCHEMA = 2
 
 _ROC_DATE_RE = re.compile(r"^(\d{3})(\d{2})(\d{2})$")
 _PERIOD_SEP_RE = re.compile(r"[~～]")  # half-width ~ (TPEx) or full-width ～ (TWSE)
@@ -99,7 +120,9 @@ class DispositionList:
     # ------------------------------------------------------------------
     # Cache: today's raw pair of responses, exactly as MarketCalendar caches
     # a year -- unparsed, so a change to the parsing rules below never needs
-    # a re-fetch of an already-cached day.
+    # a re-fetch of an already-cached day. The URLs and a schema version are
+    # stored alongside the raw pair so a cache from a different endpoint or
+    # an older shape is never replayed (see the module docstring).
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -128,7 +151,9 @@ class DispositionList:
 
     @staticmethod
     def _read_cached(path: str) -> Optional[Dict[str, object]]:
-        """The cached date's raw pair; None when absent or unreadable (a bad file is removed)."""
+        """The cached date's raw pair; None when absent, unreadable, or
+        written by a different endpoint/schema (either is removed as if it
+        were corrupt, so the next call re-fetches and overwrites it)."""
         if not (os.path.isfile(path) and os.path.getsize(path) > 0):
             return None
         try:
@@ -136,7 +161,11 @@ class DispositionList:
                 payload = json.load(fh)
             if not isinstance(payload, dict) or "twse" not in payload or "otc" not in payload:
                 raise ValueError("not a cached disposition payload")
-            return payload
+            if (payload.get("schema") != _CACHE_SCHEMA
+                    or payload.get("twse_url") != TWSE_PUNISH_URL
+                    or payload.get("otc_url") != TPEX_DISPOSAL_URL):
+                raise ValueError("cached payload is from a different endpoint or schema version")
+            return {"twse": payload["twse"], "otc": payload["otc"]}
         except (OSError, ValueError) as exc:
             logger.warning("disposition cache %s unreadable, fetching again: %s", path, exc)
             try:
@@ -150,56 +179,42 @@ class DispositionList:
         if cached is not None:
             return cached
         raw = {"twse": self._fetch_json(TWSE_PUNISH_URL), "otc": self._fetch_json(TPEX_DISPOSAL_URL)}
+        to_store = {"schema": _CACHE_SCHEMA, "twse_url": TWSE_PUNISH_URL, "otc_url": TPEX_DISPOSAL_URL, **raw}
         try:
-            self._write_atomic(json.dumps(raw, ensure_ascii=False).encode("utf-8"), self.cache_path(date_iso))
+            self._write_atomic(json.dumps(to_store, ensure_ascii=False).encode("utf-8"), self.cache_path(date_iso))
         except OSError as exc:
             logger.warning("disposition %s not cached at %s: %s", date_iso, self.cache_path(date_iso), exc)
         return raw
 
     # ------------------------------------------------------------------
-    # Parsing
+    # Parsing: both exchanges publish a plain JSON array of objects, just
+    # under different field names -- one row parser, two key sets.
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_twse(payload: object) -> List[DispositionEntry]:
-        out: List[DispositionEntry] = []
-        if not isinstance(payload, dict):
-            return out
-        fields, rows = payload.get("fields"), payload.get("data")
-        if not isinstance(fields, list) or not isinstance(rows, list):
-            return out
-        try:
-            i_code, i_name, i_period = fields.index("證券代號"), fields.index("證券名稱"), fields.index("處置起迄時間")
-        except ValueError:
-            logger.warning("TWSE punish response missing an expected column; fields=%r", fields)
-            return out
-        needed = max(i_code, i_name, i_period)
-        for row in rows:
-            if not isinstance(row, list) or len(row) <= needed:
-                continue
-            code = str(row[i_code]).strip()
-            period = _roc_period(str(row[i_period]))
-            if not code or period is None:
-                continue
-            out.append(DispositionEntry(code=code, name=str(row[i_name]).strip(),
-                                        start_date=period[0], end_date=period[1]))
-        return out
-
-    @staticmethod
-    def _parse_tpex(payload: object) -> List[DispositionEntry]:
+    def _parse_rows(payload: object, *, code_key: str, name_key: str, period_key: str) -> List[DispositionEntry]:
         out: List[DispositionEntry] = []
         if not isinstance(payload, list):
             return out
         for row in payload:
             if not isinstance(row, dict):
                 continue
-            code = str(row.get("SecuritiesCompanyCode") or "").strip()
-            period = _roc_period(str(row.get("DispositionPeriod") or ""))
+            code = str(row.get(code_key) or "").strip()
+            period = _roc_period(str(row.get(period_key) or ""))
             if not code or period is None:
                 continue
-            out.append(DispositionEntry(code=code, name=str(row.get("CompanyName") or "").strip(),
+            out.append(DispositionEntry(code=code, name=str(row.get(name_key) or "").strip(),
                                         start_date=period[0], end_date=period[1]))
         return out
+
+    @classmethod
+    def _parse_twse(cls, payload: object) -> List[DispositionEntry]:
+        return cls._parse_rows(payload, code_key="Code", name_key="Name", period_key="DispositionPeriod")
+
+    @classmethod
+    def _parse_tpex(cls, payload: object) -> List[DispositionEntry]:
+        return cls._parse_rows(payload, code_key="SecuritiesCompanyCode", name_key="CompanyName",
+                               period_key="DispositionPeriod")
 
     # ------------------------------------------------------------------
     # Read surface
