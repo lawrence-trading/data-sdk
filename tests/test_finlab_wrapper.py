@@ -27,7 +27,8 @@ def _aligned_tables():
     return {
         "margin_transactions:融資今日餘額": _table(dates, **{"2330": [100, 110, 120], "2317": [5, 5, 6]}),
         "margin_transactions:融券今日餘額": _table(dates, **{"2330": [1, 2, 3], "2317": [0, 0, 0]}),
-        "security_lending_sell:借券賣出餘額": _table(dates, **{"2330": [7, 8, 9], "2317": [1, 1, 1]}),
+        # FinLab publishes 借券賣出餘額 in shares.
+        "security_lending_sell:借券賣出餘額": _table(dates, **{"2330": [7000, 8000, 9400], "2317": [1000, 1000, 600]}),
         "intraday_trading:得先賣後買當沖": _table(dates, **{"2330": ["Y", "Y", "Y"], "2317": ["N", "N", "Y"]}),
     }
 
@@ -83,7 +84,8 @@ def test_wrapper_returns_last_completed_day_per_stock(cache_dir):
     assert list(frame.columns) == list(DATASETS)
     assert frame.loc["2330", "margin_balance"] == 120
     assert frame.loc["2317", "short_balance"] == 0
-    assert frame.loc["2330", "lending_balance"] == 9
+    assert frame.loc["2330", "lending_balance"] == 9      # 9400 shares -> 9 張
+    assert frame.loc["2317", "lending_balance"] == 1      # 600 shares -> 1 張
     assert frame.loc["2317", "day_trade_sell_first"] == "Y"
 
 
@@ -116,6 +118,26 @@ def test_cache_holds_only_rows_before_the_query_day(cache_dir):
     assert os.path.isfile(path)
     assert os.path.basename(path) == "20260916.parquet"
     assert all(ord(ch) < 128 for ch in path)
+
+
+class _GuardedIndexFrame(pd.DataFrame):
+    """Stands in for finlab's FinlabDataFrame, which raises on ``df.index = ...``."""
+
+    @property
+    def _constructor(self):
+        return _GuardedIndexFrame
+
+    def __setattr__(self, name, value):
+        if name == "index":
+            raise AttributeError("不要直接覆寫 FinlabDataFrame 的 index！")
+        super().__setattr__(name, value)
+
+
+def test_a_frame_that_refuses_index_assignment_is_read_as_a_plain_frame(cache_dir):
+    tables = {name: _GuardedIndexFrame(frame) for name, frame in _aligned_tables().items()}
+    report_date, frame = FinLabWrapper(fetch=lambda name: tables[name]).get_ssf_reference(TODAY)
+    assert report_date == dt.date(2026, 9, 16)
+    assert frame.loc["2330", "lending_balance"] == 9
 
 
 def test_cold_fetch_without_token_names_the_variable(cache_dir):

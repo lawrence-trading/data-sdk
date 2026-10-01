@@ -5,7 +5,7 @@ stock id:
 
     margin_balance         margin_transactions:融資今日餘額   (張)
     short_balance          margin_transactions:融券今日餘額   (張)
-    lending_balance        security_lending_sell:借券賣出餘額 (張)
+    lending_balance        security_lending_sell:借券賣出餘額 (shares; returned in 張)
     day_trade_sell_first   intraday_trading:得先賣後買當沖
 
 FinLab lands these at about 19:24 Taipei, so the row a consumer may trust
@@ -39,6 +39,9 @@ DATASETS = {
 # Rows kept per cached table: enough that a holiday cluster still leaves a
 # completed trading day in the cache, small enough to be a few KB per stock.
 CACHE_TRAILING_ROWS = 10
+
+# FinLab's 借券賣出餘額 is in shares; one 張 is 1000 shares.
+SHARES_PER_LOT = 1000
 
 
 class FinLabAlignmentError(RuntimeError):
@@ -173,8 +176,10 @@ class FinLabWrapper:
             frame.index = pd.to_datetime(frame.index)
             return frame
 
-        full = self._fetch_dataset(dataset)
-        full = full.copy()
+        # A plain DataFrame: finlab's FinlabDataFrame refuses an index
+        # assignment (its lookahead-bias guard), and these daily tables need
+        # nothing from its report-date semantics.
+        full = pd.DataFrame(self._fetch_dataset(dataset)).copy()
         full.index = pd.to_datetime(full.index)
         full.columns = [str(c) for c in full.columns]
         trailing = full.loc[full.index < pd.Timestamp(today)].tail(CACHE_TRAILING_ROWS)
@@ -185,8 +190,9 @@ class FinLabWrapper:
         """The four SSF reference columns for the last completed trading day.
 
         Returns ``(report_date, frame)``: ``frame`` is indexed by stock id
-        with columns ``margin_balance``, ``short_balance``,
-        ``lending_balance`` (張, as FinLab publishes them) and
+        with columns ``margin_balance``, ``short_balance`` (張, as FinLab
+        publishes them), ``lending_balance`` (張: FinLab publishes shares,
+        divided by 1000 and rounded) and
         ``day_trade_sell_first`` (FinLab's own flag value, untouched). A stock
         absent from a table is NaN in that column -- 0 is never substituted.
 
@@ -198,6 +204,8 @@ class FinLabWrapper:
         frames = {key: self.get_table(name, today) for key, name in DATASETS.items()}
         report_date, rows = align_latest_rows(frames, today)
         out = pd.DataFrame({key: row for key, row in rows.items()})
+        # 借券賣出餘額 is published in shares; every other column is in 張.
+        out["lending_balance"] = (pd.to_numeric(out["lending_balance"], errors="coerce") / SHARES_PER_LOT).round()
         out.index = out.index.astype(str)
         out.index.name = "stock_id"
         return report_date, out[list(DATASETS)]
