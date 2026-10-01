@@ -70,6 +70,16 @@ def taifex_prod_id(contract: str, contract_month: str) -> Optional[str]:
     return f"{root}{_MONTH_CODES[month - 1]}{year_month[3]}"
 
 
+class TaifexResponseError(ValueError):
+    """An OpenAPI endpoint answered with a body ``json.loads`` cannot parse --
+    an error page, an empty body, or anything else that is not the endpoint's
+    normal JSON array. Carries the URL, the response's Content-Type and a
+    preview of its first bytes so the caller (``refresh_ssf_reference.py``'s
+    ``errors`` dict, surfaced to ``GET /api/ssf/health``) names what actually
+    came back instead of just "Expecting value: line 1 column 1" (ISSUES.md
+    I-98)."""
+
+
 class TaifexWrapper:
     _DEFAULT_CACHE_DIR = "/mnt/nfs/backup/taifex_cache"
 
@@ -97,7 +107,19 @@ class TaifexWrapper:
 
     @classmethod
     def _http_json(cls, url: str) -> list:
-        return json.loads(cls._http_bytes(url).decode("utf-8"))
+        import requests
+
+        response = requests.get(url, timeout=REQUEST_TIMEOUT_S)
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "<no Content-Type header>")
+        try:
+            return json.loads(response.content.decode("utf-8", errors="replace"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            preview = response.content[:200]
+            raise TaifexResponseError(
+                f"TAIFEX endpoint {url} did not return JSON "
+                f"(content-type={content_type!r}, first bytes={preview!r}): {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Cache
@@ -130,22 +152,71 @@ class TaifexWrapper:
                 return fh.read()
         return None
 
+    def _latest_cached_rows(self, endpoint: str) -> Optional[Tuple[str, list]]:
+        """The most recently cached day for *endpoint* (by the as-of date in
+        its filename), or None when nothing is cached at all. The fallback
+        ``_fetch_rows_with_retry`` uses once a live fetch has failed twice in
+        a row -- a stale-but-real last-good day beats no data at all for a
+        page nothing on the dashboard actually reads from this endpoint yet
+        (ISSUES.md I-98)."""
+        directory = os.path.join(self.cache_dir(), endpoint)
+        if not os.path.isdir(directory):
+            return None
+        days = sorted(name[:-5] for name in os.listdir(directory) if name.endswith(".json") and name[:-5].isdigit())
+        if not days:
+            return None
+        latest = days[-1]
+        cached = self._read_cached(os.path.join(directory, f"{latest}.json"))
+        if cached is None:
+            return None
+        try:
+            return latest, json.loads(cached.decode("utf-8"))
+        except ValueError:
+            return None
+
+    def _fetch_rows_with_retry(self, endpoint: str, url: str) -> list:
+        """One fetch, a single retry on any failure (including a non-JSON or
+        empty response -- ``_http_json``/an injected ``fetch_json`` raising,
+        or a response that parses to an empty list), and only then a fall
+        back to the latest cached day for *endpoint* if one exists. Raises
+        the retry's own error (already naming the endpoint, content-type and
+        a body preview when it came from ``_http_json``) when there is
+        nothing cached to fall back to (ISSUES.md I-98)."""
+        last_exc: Exception
+        for _ in range(2):
+            try:
+                rows = self._fetch_json(url)
+            except Exception as exc:  # noqa: BLE001 - re-raised below if nothing can rescue this
+                last_exc = exc
+                continue
+            if not rows:
+                last_exc = RuntimeError(f"TAIFEX {endpoint} returned an empty response ({url})")
+                continue
+            return rows
+        fallback = self._latest_cached_rows(endpoint)
+        if fallback is not None:
+            return fallback[1]
+        raise RuntimeError(f"TAIFEX {endpoint} fetch failed after a retry ({url}): {last_exc}") from last_exc
+
     def _openapi_rows(self, endpoint: str, url: str, day) -> Tuple[str, list]:
         """Rows of an OpenAPI endpoint for ``day`` (None: whatever is live).
 
         The endpoint publishes one day at a time, keyed by its own ``Date``
         field; a fetch is always cached under that date. Asking for a day the
         endpoint no longer serves and the cache does not hold raises
-        FileNotFoundError rather than returning another day's rows.
+        FileNotFoundError rather than returning another day's rows. A live
+        fetch (``day`` is None, or the day is not yet cached) that errors or
+        comes back empty is retried once, then served from the latest cached
+        day if one exists (ISSUES.md I-98); only when neither recovers it
+        does the clear, endpoint-naming error from the retry reach the
+        caller.
         """
         if day is not None:
             path = self.cache_path(endpoint, day, "json")
             cached = self._read_cached(path)
             if cached is not None:
                 return _normalize_day(day), json.loads(cached.decode("utf-8"))
-        rows = self._fetch_json(url)
-        if not rows:
-            raise RuntimeError(f"TAIFEX {endpoint} returned no rows")
+        rows = self._fetch_rows_with_retry(endpoint, url)
         live_day = _normalize_day(rows[0]["Date"])
         self._write_atomic(
             json.dumps(rows, ensure_ascii=False).encode("utf-8"),

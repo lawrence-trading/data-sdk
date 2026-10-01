@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from data_sdk import TaifexWrapper, taifex_prod_id
+from data_sdk import TaifexResponseError, TaifexWrapper, taifex_prod_id
 
 
 def _report_rows():
@@ -146,3 +146,88 @@ def test_cached_json_is_the_raw_payload(cache_dir):
     TaifexWrapper(fetch_json=lambda url: rows).get_daily_market_report_fut()
     stored = json.loads((cache_dir / "daily_market_report_fut" / "20260916.json").read_text("utf-8"))
     assert stored == rows
+
+
+# ---------------------------------------------------------------------------
+# ISSUES.md I-98: a non-JSON/empty answer, one retry, and falling back to the
+# latest cached day rather than raising straight away.
+# ---------------------------------------------------------------------------
+
+
+def test_http_json_names_the_endpoint_content_type_and_body_on_a_non_json_reply(monkeypatch):
+    """A 502 from a proxy in front of the real endpoint -- an HTML error page,
+    not JSON -- must not surface as the bare `JSONDecodeError: Expecting
+    value: line 1 column 1 (char 0)` ISSUES.md I-98 complained about."""
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+        content = b"<html><body>502 Bad Gateway</body></html>"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("requests.get", lambda url, timeout: FakeResponse())
+    url = "https://openapi.taifex.com.tw/v1/SSFAdjustedInfo"
+    with pytest.raises(TaifexResponseError) as exc_info:
+        TaifexWrapper._http_json(url)
+    message = str(exc_info.value)
+    assert url in message
+    assert "text/html" in message
+    assert "502 Bad Gateway" in message
+
+
+def test_adjusted_info_retries_once_then_raises_a_clear_error_with_nothing_cached(cache_dir):
+    calls = []
+
+    def always_fails(url):
+        calls.append(url)
+        raise ValueError("boom")
+
+    wrapper = TaifexWrapper(fetch_json=always_fails)
+    with pytest.raises(RuntimeError) as exc_info:
+        wrapper.get_ssf_adjusted_info()
+    assert len(calls) == 2  # the original attempt plus exactly one retry
+    message = str(exc_info.value)
+    assert "ssf_adjusted_info" in message
+    assert "boom" in message
+
+
+def test_adjusted_info_succeeds_on_the_retry(cache_dir):
+    calls = []
+
+    def fails_once_then_ok(url):
+        calls.append(url)
+        if len(calls) == 1:
+            raise ValueError("transient")
+        return _adjusted_rows()
+
+    frame = TaifexWrapper(fetch_json=fails_once_then_ok).get_ssf_adjusted_info()
+    assert len(calls) == 2
+    assert frame["Contract"].tolist() == ["CM1"]
+
+
+def test_adjusted_info_treats_an_empty_response_as_a_failure_and_retries(cache_dir):
+    calls = []
+
+    def empty_then_ok(url):
+        calls.append(url)
+        return [] if len(calls) == 1 else _adjusted_rows()
+
+    frame = TaifexWrapper(fetch_json=empty_then_ok).get_ssf_adjusted_info()
+    assert len(calls) == 2
+    assert frame["Contract"].tolist() == ["CM1"]
+
+
+def test_adjusted_info_falls_back_to_the_latest_cached_day_once_retrying_is_exhausted(cache_dir):
+    # A prior successful run seeds the cache.
+    TaifexWrapper(fetch_json=lambda url: _adjusted_rows()).get_ssf_adjusted_info()
+
+    calls = []
+
+    def always_fails(url):
+        calls.append(url)
+        raise ValueError("today's fetch is down")
+
+    frame = TaifexWrapper(fetch_json=always_fails).get_ssf_adjusted_info()
+    assert len(calls) == 2  # tried, retried, THEN fell back -- never a third live attempt
+    assert frame["Contract"].tolist() == ["CM1"]  # the cached day's own content, not an empty frame

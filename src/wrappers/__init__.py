@@ -9,7 +9,7 @@ from .warrant_info_wrapper import WarrantInfoWrapper
 from .tej_wrapper import TEJWrapper
 from .fop_wrapper import get_fop_parquet, get_fop_order_book
 from .finlab_wrapper import FinLabWrapper, FinLabAlignmentError
-from .taifex_wrapper import TaifexWrapper, taifex_prod_id
+from .taifex_wrapper import TaifexWrapper, TaifexResponseError, taifex_prod_id
 from .market_calendar import MarketCalendar, HolidayEntry, UnknownCalendarYear
 from .disposition import DispositionList, DispositionEntry
 from .ssf_decimal_locator import (
@@ -33,6 +33,7 @@ __all__ = [
     "FinLabWrapper",
     "FinLabAlignmentError",
     "TaifexWrapper",
+    "TaifexResponseError",
     "taifex_prod_id",
     "MarketCalendar",
     "HolidayEntry",
