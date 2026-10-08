@@ -3,10 +3,14 @@
 No network, no broker login, no FinLab token -- same fake-Contracts style as
 test_shioaji_stock_contracts.py's get_stock_contracts() tests.
 
-A separate, real-login integration test (pytest.mark.integration, skipped
-without SHIOAJI_API_KEY/SHIOAJI_SECRET_KEY) pins down the two field values
-this module cannot otherwise confirm: the exact live option_right.value
-string, and that `multiplier` really is populated by the server.
+option_right.value's exact live string ("C"/"P", confirmed against the
+installed shioaji.OptionRight enum itself -- see
+test_option_contract_model_carries_the_fields_this_wrapper_reads and
+_option_right_str's docstring) needs no login to confirm. A separate,
+real-login integration test (pytest.mark.integration, skipped without
+SHIOAJI_API_KEY/SHIOAJI_SECRET_KEY) pins down the one thing a fake object
+genuinely cannot: that `multiplier` is actually populated by the server for
+a real contract, not merely present as a class attribute.
 """
 
 import os
@@ -34,7 +38,11 @@ class _FakeOption:
 
 
 class _FakeOptionRight:
-    """Stands in for the real shioaji.OptionRight enum."""
+    """Stands in for the real shioaji.OptionRight enum. Its ``.value`` is
+    always "C"/"P" on a real contract (confirmed against the installed
+    shioaji.OptionRight enum, not "Call"/"Put" -- see
+    test_option_contract_model_carries_the_fields_this_wrapper_reads);
+    callers below pass that real value, not the enum member's own name."""
 
     def __init__(self, value):
         self.value = value
@@ -82,19 +90,19 @@ def _sample_options():
     txo = [
         _FakeOption(code="TXO24000J6", symbol="TXO202610024000C", name="TXO202610C24000",
                     category="TXO", delivery_month="202610", delivery_date="2026/10/21",
-                    strike_price=24000.0, option_right=_FakeOptionRight("Call"),
+                    strike_price=24000.0, option_right=_FakeOptionRight("C"),
                     underlying_kind="I", underlying_code="001", unit=1,
                     multiplier=50, update_date="2026/10/07"),
         _FakeOption(code="TXO24000V6", symbol="TXO202610024000P", name="TXO202610P24000",
                     category="TXO", delivery_month="202610", delivery_date="2026/10/21",
-                    strike_price="24000", option_right=_FakeOptionRight("Put"),
+                    strike_price="24000", option_right=_FakeOptionRight("P"),
                     underlying_kind="I", underlying_code="001", unit=1,
                     multiplier=50, update_date="2026/10/07"),
     ]
     dho = [
         _FakeOption(code="DHO02600J6", symbol="DHO2026100260C", name="DHO202610C26.0",
                     category="DHO", delivery_month="202610", delivery_date="2026/10/21",
-                    strike_price=26.0, option_right=_FakeOptionRight("Call"),
+                    strike_price=26.0, option_right=_FakeOptionRight("C"),
                     underlying_kind="S", underlying_code="2454", unit=2000,
                     multiplier=None, update_date="2026/10/07"),
     ]
@@ -130,13 +138,14 @@ def test_option_right_is_normalized_through_its_value(wrapper, monkeypatch):
 
     df = wrapper.get_option_contracts().set_index("code")
 
-    assert df.loc["TXO24000J6", "option_right"] == "Call"
-    assert df.loc["TXO24000V6", "option_right"] == "Put"
+    assert df.loc["TXO24000J6", "option_right"] == "C"
+    assert df.loc["TXO24000V6", "option_right"] == "P"
 
 
 def test_option_right_also_accepts_a_plain_string(wrapper, monkeypatch):
-    # A caller that already normalized (or a future Shioaji release that
-    # returns a plain "C"/"P" string) must not break _option_right_str.
+    # A caller that already has the real, normalized value ("C"/"P",
+    # bypassing the OptionRight enum wrapper entirely) must not break
+    # _option_right_str.
     options = _FakeGroups([[
         _FakeOption(code="TXO24000J6", symbol="s", name="n", category="TXO",
                     delivery_month="202610", delivery_date="2026/10/21",
@@ -210,11 +219,16 @@ def test_option_contract_model_carries_the_fields_this_wrapper_reads():
 
 @pytest.mark.integration
 def test_live_option_right_and_multiplier_values():
-    """Confirms, against a real Shioaji login, the two things a fake object
-    cannot: option_right.value's exact live string ("C"/"P" vs "Call"/"Put")
-    and that `multiplier` is actually populated by the server for a real TXO
-    contract, not merely present as a class attribute (docs/tasks/42's own
-    instruction: write this as an integration test and skip it, never fake
+    """Confirms, against a real Shioaji login, the one thing a fake object
+    genuinely cannot: that `multiplier` is actually populated by the server
+    for a real TXO contract, not merely present as a class attribute.
+    option_right.value's exact live string ("C"/"P") is already confirmed
+    offline, without any login, against the installed shioaji package's own
+    OptionRight enum (see _option_right_str's docstring and
+    test_option_contract_model_carries_the_fields_this_wrapper_reads); it is
+    re-asserted here only as a live sanity check, not as the thing this test
+    exists to pin down (docs/tasks/42's own instruction: write what still
+    needs a live login as an integration test and skip it, never fake
     having verified it).
 
     Gated on its own opt-in variable, never on SHIOAJI_API_KEY/
@@ -234,5 +248,6 @@ def test_live_option_right_and_multiplier_values():
     df = ShioajiWrapper().get_option_contracts()
     txo = df[df["code"].str.startswith("TXO")]
     assert not txo.empty
-    assert set(txo["option_right"].dropna().unique()) <= {"C", "P", "Call", "Put"}
+    # Sanity re-check of the offline-confirmed value, not news.
+    assert set(txo["option_right"].dropna().unique()) <= {"C", "P"}
     assert txo["multiplier"].notna().any()

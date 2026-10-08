@@ -199,14 +199,13 @@ class ShioajiWrapper:
         """Normalize ``Contract.option_right`` to a plain string.
 
         A live contract's ``option_right`` is a ``shioaji.OptionRight`` enum
-        (``No``/``Call``/``Put``, per ``shioaji/_core.pyi``); its exact
-        ``.value`` -- ``"Call"``/``"Put"`` vs the exchange's own ``"C"``/
-        ``"P"`` -- is unconfirmed without a live login (see
-        ``test_shioaji_option_contracts.py``'s integration test, which pins
-        it down and is skipped without Shioaji credentials). This duck-types
-        on ``.value`` so a real enum, a plain string (as every unit test and
-        any already-normalized source passes), and ``None`` are all handled
-        the same way.
+        (``No``/``Call``/``Put`` members, per ``shioaji/_core.pyi``). Its
+        ``.value`` is confirmed directly against the installed ``shioaji``
+        package, no login needed: ``OptionRight.Call.value == "C"``,
+        ``OptionRight.Put.value == "P"`` -- the exchange's own convention,
+        never the member names ``"Call"``/``"Put"`` themselves. This
+        duck-types on ``.value`` so a real enum, a plain already-normalized
+        string, and ``None`` are all handled the same way.
         """
         if value is None:
             return None
