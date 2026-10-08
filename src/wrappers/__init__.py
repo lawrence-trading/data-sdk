@@ -20,6 +20,13 @@ from .ssf_decimal_locator import (
     ssf_decimal_locator_calibration_day,
     ssf_decimal_locator_version,
 )
+from .txo_decimal_locator import (
+    TxoLocatorEntry,
+    get_txo_decimal_locator,
+    taifex_option_prod_id,
+    txo_decimal_locator_calibration_day,
+    txo_decimal_locator_version,
+)
 
 __all__ = [
     "FinMindWrapper",
@@ -48,4 +55,9 @@ __all__ = [
     "price_raw_to_1e4",
     "ssf_decimal_locator_calibration_day",
     "ssf_decimal_locator_version",
+    "TxoLocatorEntry",
+    "get_txo_decimal_locator",
+    "taifex_option_prod_id",
+    "txo_decimal_locator_calibration_day",
+    "txo_decimal_locator_version",
 ]

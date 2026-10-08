@@ -137,6 +137,7 @@ from data_sdk import (
     get_order_book_stocks,
     get_order_book_warrant,
     get_ssf_decimal_locator,
+    get_txo_decimal_locator,
 )
 from pathlib import Path
 
@@ -221,6 +222,21 @@ price_1e4 = 239000 * 10 ** (4 - entry.locator)         # 1/10000 NTD, integers o
 # near-month alias, or month symbol)
 df_fut = shioaji.get_futures_ticks("2024-08-01", "CDFR1")
 df_contracts = shioaji.get_futures_contracts()  # currently-listed contracts only
+
+# TAIFEX option contracts (臺指選頁), every root (filter by category=="TXO"
+# yourself). strike_1e4 is already integer 1/10000 NTD (never a float);
+# multiplier (NT$ per point) is Shioaji's own field, read straight through.
+df_options = shioaji.get_option_contracts()
+
+# TAIFEX options daily report (the DailyMarketReportOpt counterpart of
+# get_daily_market_report_fut; confirmed by a live GET, no credential).
+opt_report = taifex.get_daily_market_report_opt()  # TradingSession == '一般'
+
+# Frozen TXO root decimal locator/tick (docs/pages/txo.md §2.2): calibrated
+# offline against DailyMarketReportOpt + the archived i024 options feed,
+# plain-monthly contracts only (weeklies carry a different PROD-ID root).
+txo_entry = get_txo_decimal_locator("TXO")
+txo_price_1e4 = 24000 * 10 ** (4 - txo_entry.locator)
 
 # TEJ monthly revenue announcements (TWN/EWSALE, incrementally cached as CSV;
 # optionally set TEJ_API_TOKEN / DATA_SDK_TEJ_CACHE_PATH). Columns: coid,

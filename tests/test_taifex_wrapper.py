@@ -28,6 +28,23 @@ def _report_rows():
     ]
 
 
+def _opt_report_rows():
+    def row(contract, month, strike, call_put, session, close="0.2"):
+        return {
+            "Date": "20261007", "Contract": contract, "ContractMonth(Week)": month,
+            "StrikePrice": strike, "CallPut": call_put, "Open": close, "High": close,
+            "Low": close, "Close": close, "Volume": "10", "SettlementPrice": close,
+            "OpenInterest": "100", "BestBid": close, "BestAsk": close,
+            "HistoricalHigh": close, "HistoricalLow": close, "TradingHalt": "",
+            "TradingSession": session,
+        }
+    return [
+        row("TXO", "202610", "24000", "買權", "一般"),
+        row("TXO", "202610", "24000", "買權", "盤後"),
+        row("TXO", "202610W1", "24500", "買權", "一般"),
+    ]
+
+
 def _adjusted_rows():
     return [
         {"Date": "20260916", "Contract": "CBA", "StockCode": "2002", "ContractName": "中鋼",
@@ -96,6 +113,17 @@ def test_daily_report_for_a_day_the_endpoint_no_longer_serves_raises(cache_dir):
         wrapper.get_daily_market_report_fut("20260915")
     # The live day was still cached on the way.
     assert (cache_dir / "daily_market_report_fut" / "20260916.json").is_file()
+
+
+def test_daily_report_opt_keeps_regular_session_and_no_prod_id_column(cache_dir):
+    wrapper = TaifexWrapper(fetch_json=lambda url: _opt_report_rows())
+    frame = wrapper.get_daily_market_report_opt()
+
+    assert (frame["TradingSession"] == "一般").all()
+    assert len(frame) == 2  # the 一般 monthly row and the 一般 weekly row
+    assert "prod_id" not in frame.columns
+    assert all(isinstance(v, str) for v in frame["Close"])
+    assert (cache_dir / "daily_market_report_opt" / "20261007.json").is_file()
 
 
 def test_adjusted_info_keeps_stock_futures_only(cache_dir):

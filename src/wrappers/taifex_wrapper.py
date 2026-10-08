@@ -3,6 +3,11 @@
     DailyMarketReportFut   https://openapi.taifex.com.tw/v1/DailyMarketReportFut
                            settlement price, open interest, volume per contract
                            month; the ``一般`` session only
+    DailyMarketReportOpt   https://openapi.taifex.com.tw/v1/DailyMarketReportOpt
+                           the options counterpart (confirmed 2026-10-08 by a
+                           live GET: HTTP 200, JSON rows with StrikePrice/
+                           CallPut/Close -- a guessed name,
+                           ``OptionsDailyMarketReport``, 302-redirects instead)
     SSFAdjustedInfo        https://openapi.taifex.com.tw/v1/SSFAdjustedInfo
                            調整型 contracts and their adjusted share counts
     sSFTradePauseInfoDown  https://www.taifex.com.tw/cht/4/sSFTradePauseInfoDown
@@ -27,6 +32,7 @@ import pandas as pd
 
 OPENAPI_BASE = "https://openapi.taifex.com.tw/v1"
 DAILY_MARKET_REPORT_FUT_URL = f"{OPENAPI_BASE}/DailyMarketReportFut"
+DAILY_MARKET_REPORT_OPT_URL = f"{OPENAPI_BASE}/DailyMarketReportOpt"
 SSF_ADJUSTED_INFO_URL = f"{OPENAPI_BASE}/SSFAdjustedInfo"
 SSF_TRADE_PAUSE_URL = "https://www.taifex.com.tw/cht/4/sSFTradePauseInfoDown"
 
@@ -259,6 +265,35 @@ class TaifexWrapper:
             dtype=object,
         )
         return frame
+
+    def get_daily_market_report_opt(self, day=None) -> pd.DataFrame:
+        """``DailyMarketReportOpt`` rows with ``TradingSession == '一般'``.
+
+        Columns are the endpoint's own (``Date``, ``Contract``,
+        ``ContractMonth(Week)``, ``StrikePrice``, ``CallPut`` (``買權`` /
+        ``賣權``), ``Open``, ``High``, ``Low``, ``Close``, ``Volume``,
+        ``SettlementPrice``, ``OpenInterest``, ``BestBid``, ``BestAsk``,
+        ``HistoricalHigh``, ``HistoricalLow``, ``TradingHalt``,
+        ``TradingSession``) as strings, exactly as published.
+
+        Unlike ``get_daily_market_report_fut``, this does **not** add a
+        ``prod_id`` column: the options PROD-ID scheme uses a different
+        month-letter range per ``CallPut`` and TXO's weekly contracts are
+        carried under a PROD-ID root distinct from ``TXO`` in the raw i024
+        feed (verified against ``options_day_20261007_0840_i024.parquet``:
+        every one of its 514 ``TXO``-rooted prod_ids is reproduced, with no
+        unexplained leftover in either direction, by reconstructing plain
+        *monthly* ``TXO`` contracts only -- see
+        ``txo_decimal_locator.taifex_option_prod_id`` for that narrow,
+        verified mapping and its calibration use).
+
+        ``day``: ``YYYYMMDD`` / ``YYYY-MM-DD`` / date. None returns the
+        endpoint's current day. A day that is neither cached nor live raises
+        FileNotFoundError.
+        """
+        _, rows = self._openapi_rows("daily_market_report_opt", DAILY_MARKET_REPORT_OPT_URL, day)
+        frame = pd.DataFrame(rows, dtype=str)
+        return frame[frame["TradingSession"] == "一般"].reset_index(drop=True)
 
     def get_ssf_adjusted_info(self, day=None, futures_only: bool = True) -> pd.DataFrame:
         """``SSFAdjustedInfo`` rows: the 調整型 contracts and their terms.

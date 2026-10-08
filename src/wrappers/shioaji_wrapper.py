@@ -1,6 +1,7 @@
 import os
 import tempfile
 import time
+from decimal import Decimal, InvalidOperation
 import pandas as pd
 import shioaji as sj
 from pathlib import Path
@@ -192,6 +193,89 @@ class ShioajiWrapper:
             for contract in product:
                 rows.append({f: getattr(contract, f, None) for f in fields})
         return pd.DataFrame(rows, columns=fields)
+
+    @staticmethod
+    def _option_right_str(value):
+        """Normalize ``Contract.option_right`` to a plain string.
+
+        A live contract's ``option_right`` is a ``shioaji.OptionRight`` enum
+        (``No``/``Call``/``Put``, per ``shioaji/_core.pyi``); its exact
+        ``.value`` -- ``"Call"``/``"Put"`` vs the exchange's own ``"C"``/
+        ``"P"`` -- is unconfirmed without a live login (see
+        ``test_shioaji_option_contracts.py``'s integration test, which pins
+        it down and is skipped without Shioaji credentials). This duck-types
+        on ``.value`` so a real enum, a plain string (as every unit test and
+        any already-normalized source passes), and ``None`` are all handled
+        the same way.
+        """
+        if value is None:
+            return None
+        v = getattr(value, "value", value)
+        return str(v) if v else None
+
+    @staticmethod
+    def _strike_to_1e4(value):
+        """A Shioaji ``strike_price`` (float or string) as integer 1/10000 NTD.
+
+        Converts through ``Decimal(str(value))`` so no float ever reaches
+        the page's money path (CLAUDE.md). None (missing field) stays None.
+        """
+        if value is None:
+            return None
+        try:
+            return int((Decimal(str(value)) * 10_000).to_integral_value())
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    def get_option_contracts(self) -> pd.DataFrame:
+        """One row per listed TAIFEX option contract (every root, e.g. TXO).
+
+        Columns: code, symbol, name, category, delivery_month,
+        delivery_date, strike_1e4, option_right, underlying_kind,
+        underlying_code, unit, multiplier, update_date.
+
+        ``strike_1e4`` is ``strike_price`` rescaled to integer 1/10000 NTD in
+        this layer (see ``_strike_to_1e4``) -- the raw float never reaches a
+        caller. ``option_right`` is normalized through ``_option_right_str``.
+        ``multiplier`` (NT$ per point) is Shioaji's own field -- confirmed
+        present directly on ``shioaji.Option`` (``shioaji/_core.pyi``:
+        ``multiplier: int``), so no separate frozen constant table is needed
+        for it (docs/tasks/42 §4.2's fallback only applies if that field were
+        missing).
+
+        Every attribute name here was checked against the installed
+        ``shioaji`` package's own ``Contract``/``Option`` class (``dir()`` /
+        the ``_core.pyi`` stub), not assumed from this file's own guess.
+
+        Shioaji downloads the live contract file at login, so this covers
+        currently-listed contracts only.
+        """
+        self._ensure_contracts_fetched()
+
+        fields = ["code", "symbol", "name", "category", "delivery_month",
+                  "delivery_date", "strike_price", "option_right",
+                  "underlying_kind", "underlying_code", "unit", "multiplier",
+                  "update_date"]
+        rows = []
+        for product in ShioajiWrapper._api.Contracts.Options:
+            for contract in product:
+                rows.append({f: getattr(contract, f, None) for f in fields})
+        df = pd.DataFrame(rows, columns=fields)
+        # pandas.array(..., dtype="Int64") (nullable) rather than a plain
+        # column assignment: a column mixing real integers with a missing
+        # contract's None otherwise upcasts to float64 (NaN for the
+        # missing ones), which would put a float back on strike_1e4's and
+        # multiplier's money path the moment more than one contract is read.
+        df["strike_1e4"] = pd.array(
+            [self._strike_to_1e4(v) for v in df["strike_price"]], dtype="Int64"
+        )
+        df["multiplier"] = pd.array(df["multiplier"].tolist(), dtype="Int64")
+        df["option_right"] = [self._option_right_str(v) for v in df["option_right"]]
+        df = df.drop(columns=["strike_price"])
+        return df[["code", "symbol", "name", "category", "delivery_month",
+                   "delivery_date", "strike_1e4", "option_right",
+                   "underlying_kind", "underlying_code", "unit", "multiplier",
+                   "update_date"]]
 
     def get_stock_contracts(self) -> pd.DataFrame:
         """One row per listed stock, across every exchange (TSE, OTC, OES).
