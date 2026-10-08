@@ -173,3 +173,85 @@ def test_only_the_single_latest_date_in_the_window_is_kept(monkeypatch, tmp_path
 
     assert sorted(frame.index) == ["2454"]
     assert (frame["date"] == "2026-09-01").all()
+
+
+def _fake_daily_frame(rows):
+    return pd.DataFrame(
+        [{"date": d, "stock_id": "TAIEX", "open": c, "max": c, "min": c, "close": c} for d, c in rows]
+    )
+
+
+def test_get_index_prevclose_picks_the_latest_date_strictly_before_before(monkeypatch):
+    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
+    seen_args = {}
+
+    def fetch(stock_id, start_date, end_date):
+        seen_args["stock_id"] = stock_id
+        seen_args["start_date"] = start_date
+        seen_args["end_date"] = end_date
+        return _fake_daily_frame([
+            ("2026-09-28", 17800.12),
+            ("2026-09-29", 17850.50),
+            # A row dated exactly "before" must never win -- this method
+            # answers the PREVIOUS close, not today's.
+            ("2026-09-30", 17999.99),
+        ])
+
+    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(taiwan_stock_daily=fetch))
+    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
+
+    close_1e2, trading_day = FinMindWrapper().get_index_prevclose(before="2026-09-30")
+
+    assert seen_args["stock_id"] == "TAIEX"
+    assert seen_args["end_date"] == "2026-09-30"
+    assert seen_args["start_date"] < "2026-09-30"
+    assert trading_day == "2026-09-29"
+    assert close_1e2 == 1785050
+
+
+def test_get_index_prevclose_defaults_to_todays_taipei_date(monkeypatch):
+    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
+    monkeypatch.setattr(FinMindWrapper, "_taipei_today_str", staticmethod(lambda: "2026-09-16"))
+    seen_args = {}
+
+    def fetch(stock_id, start_date, end_date):
+        seen_args["end_date"] = end_date
+        return _fake_daily_frame([("2026-09-15", 17500.00)])
+
+    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(taiwan_stock_daily=fetch))
+    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
+
+    close_1e2, trading_day = FinMindWrapper().get_index_prevclose()
+
+    assert seen_args["end_date"] == "2026-09-16"
+    assert trading_day == "2026-09-15"
+    assert close_1e2 == 1750000
+
+
+def test_get_index_prevclose_raises_when_only_todays_row_is_in_the_window(monkeypatch):
+    """Every row in the fetched window is dated "before" itself (e.g. the
+    exchange has not published yesterday's close yet) -- this must raise
+    loudly, never fall back to today's own close as a stand-in 昨收."""
+    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
+    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(
+        taiwan_stock_daily=lambda stock_id, start_date, end_date: _fake_daily_frame([
+            ("2026-09-30", 17999.99),
+        ])
+    ))
+    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
+
+    with pytest.raises(RuntimeError, match="no TAIEX daily row dated before"):
+        FinMindWrapper().get_index_prevclose(before="2026-09-30")
+
+
+def test_get_index_prevclose_raises_on_a_wholly_empty_window(monkeypatch):
+    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
+    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(
+        taiwan_stock_daily=lambda stock_id, start_date, end_date: pd.DataFrame(
+            columns=["date", "stock_id", "close"]
+        )
+    ))
+    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
+
+    with pytest.raises(RuntimeError, match="no TAIEX daily row in"):
+        FinMindWrapper().get_index_prevclose(before="2026-09-30")

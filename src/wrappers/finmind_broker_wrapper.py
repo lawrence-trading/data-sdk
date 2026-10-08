@@ -26,6 +26,11 @@ WEIGHT_COLUMNS = ["stock_id", "weight_per", "date"]
 # guessing a wider window silently.
 WEIGHT_LOOKBACK_DAYS = 180
 
+# docs/pages/tx.md §2.3: get_index_prevclose looks strictly before `before`
+# for TAIEX's own daily close. Ten calendar days comfortably covers the
+# longest Taiwan market closure (Lunar New Year) without widening further.
+INDEX_PREVCLOSE_LOOKBACK_DAYS = 10
+
 # Column order of the archive; a window is read as one multi-file scan, so a
 # written day must not reshuffle it.
 BROKER_COLUMNS = [
@@ -281,6 +286,48 @@ class FinMindWrapper:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
         return frame
+
+    def get_index_prevclose(self, index_id="TAIEX", before=None):
+        """``(close_1e2, trading_day_used)`` for ``index_id``'s own daily close
+        on the latest trading day strictly before ``before`` (default: today,
+        Taipei) -- ``docs/pages/tx.md`` §2.3's TWII 昨收 basis for the
+        reconstruction formula.
+
+        FinMind carries the index itself as a plain ``stock_id`` (``"TAIEX"``,
+        the same id ``_INDEX_IDS`` already excludes from the real equity
+        universe), so this is an ordinary ``taiwan_stock_daily`` query, not a
+        separate dataset. The window ends at ``before`` and is filtered to
+        ``date < before`` (strictly before, never ``<=``: this is a *previous*
+        close) over ``INDEX_PREVCLOSE_LOOKBACK_DAYS`` calendar days, the same
+        "widen explicitly or raise, never guess further back" rule
+        ``get_twii_weights`` uses for its own window. Raises ``RuntimeError``
+        when no row in the window is dated before ``before``.
+
+        Not cached: this is one row fetched once a day by
+        ``tx_dashboard/scripts/refresh_tx_reference.py``, not a per-symbol
+        batch under rate pressure like ``get_twii_weights``'s own cache.
+        """
+        before = before or self._taipei_today_str()
+        start = (pd.Timestamp(before) - pd.Timedelta(days=INDEX_PREVCLOSE_LOOKBACK_DAYS)).date().isoformat()
+        self.limiter().acquire(1)
+        raw = FinMindWrapper._api.taiwan_stock_daily(
+            stock_id=index_id, start_date=start, end_date=before
+        )
+        if raw is None or raw.empty:
+            raise RuntimeError(
+                f"no {index_id} daily row in [{start}, {before}] "
+                f"({INDEX_PREVCLOSE_LOOKBACK_DAYS}-day window) -- widen the window or check the id"
+            )
+        frame = raw[raw["date"].astype(str) < str(before)]
+        if frame.empty:
+            raise RuntimeError(
+                f"no {index_id} daily row dated before {before} in [{start}, {before}] "
+                f"({INDEX_PREVCLOSE_LOOKBACK_DAYS}-day window)"
+            )
+        latest_date = frame["date"].astype(str).max()
+        row = frame[frame["date"].astype(str) == latest_date].iloc[-1]
+        close_1e2 = int(round(float(row["close"]) * 100))
+        return close_1e2, str(latest_date)
 
     # ------------------------------------------------------------------
     # Fetch surface -- used by the scheduled writer and the archive repair.
