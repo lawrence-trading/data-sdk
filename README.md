@@ -186,6 +186,14 @@ weights.loc["2330", "weight_per"]
 report_date, ref = FinLabWrapper().get_ssf_reference()
 ref.loc["2330", ["margin_balance", "short_balance", "lending_balance", "day_trade_sell_first"]]
 
+# 重訊公告 (material-information announcements, 可轉債頁「轉換條件」用):
+# dataset id confirmed via finlab.data.search("重訊") (no login needed --
+# that search hits FinLab's public catalog, not data.get()); stock_id is
+# the filing ISSUER's own code (a CB's underlying, never its own cb_id).
+# This method does NOT classify category_raw into the owner's nine 禁止轉換
+# categories -- that mapping is the CB page's own job.
+announcements = FinLabWrapper().get_material_announcements(stock_ids=["9958"])
+
 # TAIFEX public endpoints, cached under the day each payload carries. Prices
 # come back as the published strings; prod_id is derived for the i024 join.
 taifex = TaifexWrapper()

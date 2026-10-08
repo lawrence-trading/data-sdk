@@ -10,6 +10,7 @@ import pytest
 from data_sdk import FinLabAlignmentError, FinLabWrapper
 from data_sdk.wrappers.finlab_wrapper import (
     DATASETS,
+    MATERIAL_ANNOUNCEMENT_DATASET,
     align_latest_rows,
     latest_before_today,
 )
@@ -144,3 +145,45 @@ def test_cold_fetch_without_token_names_the_variable(cache_dir):
     with pytest.raises(RuntimeError, match="FINLAB_API_TOKEN"):
         FinLabWrapper().get_table("margin_transactions:融資今日餘額", TODAY)
     assert "finlab" not in sys.modules
+
+
+def _announcement_rows():
+    return pd.DataFrame(
+        [
+            {"stock_id": "9958", "date": "2026-06-25", "name": "世紀鋼",
+             "title": "公告本公司除息基準日暨轉換公司債停止轉換期間", "info": "...",
+             "key_date": "2026-07-01"},
+            {"stock_id": "9958", "date": "2026-01-10", "name": "世紀鋼",
+             "title": "公告本公司董事會決議", "info": "...", "key_date": "2026-01-11"},
+            {"stock_id": "2330", "date": "2026-06-20", "name": "台積電",
+             "title": "法人說明會", "info": "...", "key_date": "2026-06-21"},
+        ]
+    )
+
+
+def test_material_announcements_calls_the_confirmed_dataset_id():
+    seen = {}
+
+    def fetch(dataset):
+        seen["dataset"] = dataset
+        return _announcement_rows()
+
+    FinLabWrapper(fetch=fetch).get_material_announcements()
+    assert seen["dataset"] == MATERIAL_ANNOUNCEMENT_DATASET == "important_info_announcement"
+
+
+def test_material_announcements_shape_and_filters():
+    wrapper = FinLabWrapper(fetch=lambda dataset: _announcement_rows())
+
+    all_rows = wrapper.get_material_announcements()
+    assert list(all_rows.columns) == ["stock_id", "announce_date", "category_raw"]
+    assert len(all_rows) == 3
+
+    by_stock = wrapper.get_material_announcements(stock_ids=["9958"])
+    assert set(by_stock["stock_id"]) == {"9958"}
+    assert len(by_stock) == 2
+
+    recent = wrapper.get_material_announcements(stock_ids=["9958"], since="2026-03-01")
+    assert len(recent) == 1
+    assert recent.iloc[0]["category_raw"] == "公告本公司除息基準日暨轉換公司債停止轉換期間"
+    assert recent.iloc[0]["announce_date"] == pd.Timestamp("2026-06-25")

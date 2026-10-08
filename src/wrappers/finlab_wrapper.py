@@ -23,9 +23,29 @@ before that day. A warm read needs no token; a cold fetch needs
 import datetime as dt
 import os
 import tempfile
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+# 重訊公告 (material-information announcements), confirmed 2026-10-08:
+#   - finlab.data.search("重訊") and search("重大訊息") both resolve to exactly
+#     one dataset, "important_info_announcement" (no login needed: the
+#     catalog search hits FinLab's public Firestore metadata, not the
+#     licensed data.get() endpoint).
+#   - That catalog entry's own columns are name, title, info (table_format,
+#     data_type "event"); confirmed from an already-fetched local copy
+#     (~/finlab_db/important_info_announcement.feather, 1,257,774 rows) that
+#     data.get() actually returns stock_id, date, name, title, info, key_date
+#     -- one row per announcement, stock_id keyed to the ISSUER's own 4-digit
+#     equity code.
+#   - Verified against a convertible bond known to stop conversion around
+#     every ex-dividend date: 世紀鋼 (stock_id "9958") has a "停止轉換"
+#     announcement titled 「公告本公司除息基準日暨轉換公司債停止轉換期間」 on
+#     2019-08-21, 2020-07-23, 2021-08-03, 2022-08-22, 2025-07-11 and
+#     2026-06-25 -- filed under the issuer's stock_id, never under the CB's
+#     own 5-character cb_id. A consumer must resolve cb_id -> stock_id first
+#     (CbInfoWrapper.get_cb_underlying_map) before reading this table.
+MATERIAL_ANNOUNCEMENT_DATASET = "important_info_announcement"
 
 TAIPEI = dt.timezone(dt.timedelta(hours=8))
 
@@ -209,3 +229,46 @@ class FinLabWrapper:
         out.index = out.index.astype(str)
         out.index.name = "stock_id"
         return report_date, out[list(DATASETS)]
+
+    def get_material_announcements(
+        self, stock_ids: Optional[List[str]] = None, since=None
+    ) -> pd.DataFrame:
+        """重訊公告 rows from the ``important_info_announcement`` dataset.
+
+        See the module-level comment above ``MATERIAL_ANNOUNCEMENT_DATASET``
+        for how that dataset id was confirmed and for its real shape. Returns
+        ``stock_id, announce_date, category_raw`` (one row per announcement):
+
+            stock_id       the filing ISSUER's own 4-digit equity code -- for
+                           a convertible bond this is its *underlying stock*,
+                           never the bond's own cb_id (resolve with
+                           ``CbInfoWrapper.get_cb_underlying_map`` first)
+            announce_date  the announcement's own timestamp (pandas Timestamp)
+            category_raw   the announcement's title, verbatim -- this method
+                           does NOT classify it into the owner's nine 禁止轉換
+                           categories (docs/tasks/42 §3); that mapping needs
+                           the full announcement text and belongs to the CB
+                           page task, not here.
+
+        ``stock_ids`` (optional): keep only these issuer stock ids. ``since``
+        (optional, a date or ``"YYYY-MM-DD"``): keep only announcements on or
+        after it. Both default to no filtering (the whole history, ~1.26M
+        rows as of 2026-10-08).
+
+        Every call re-fetches the dataset through ``_fetch_dataset`` (no
+        per-day cache like ``get_table``'s trailing-rows file, because this
+        is one accumulating event log rather than a daily snapshot table); a
+        caller that wants to avoid repeated ``finlab.data.get()`` calls
+        caches the result itself.
+        """
+        raw = self._fetch_dataset(MATERIAL_ANNOUNCEMENT_DATASET)
+        frame = pd.DataFrame(raw).copy()
+        frame = frame.rename(columns={"date": "announce_date", "title": "category_raw"})
+        frame["stock_id"] = frame["stock_id"].astype(str)
+        frame["announce_date"] = pd.to_datetime(frame["announce_date"])
+        if stock_ids is not None:
+            wanted = {str(s) for s in stock_ids}
+            frame = frame[frame["stock_id"].isin(wanted)]
+        if since is not None:
+            frame = frame[frame["announce_date"] >= pd.Timestamp(since)]
+        return frame[["stock_id", "announce_date", "category_raw"]].reset_index(drop=True)
