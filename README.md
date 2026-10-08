@@ -83,6 +83,8 @@ export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"  # defaults to t
 export DATA_SDK_FINLAB_CACHE_PATH="/mnt/nfs/backup/finlab_cache"    # defaults to this path if unset
 export DATA_SDK_TAIFEX_CACHE_PATH="/mnt/nfs/backup/taifex_cache"    # defaults to this path if unset
 export DATA_SDK_MARKET_CALENDAR_CACHE_PATH="$HOME/.cache/data_sdk/market_calendar"  # default: $XDG_CACHE_HOME/data_sdk/market_calendar, else ~/.cache/data_sdk/market_calendar
+export DATA_SDK_FINMIND_WEIGHT_PATH="/mnt/nfs/backup/finmind_cache/twii_weight"     # defaults to this path if unset
+export DATA_SDK_CB_CACHE_PATH="/mnt/nfs/backup/finmind_cache/cb"                    # defaults to this path if unset
 ```
 
 ### API Keys
@@ -171,6 +173,12 @@ stocks = shioaji.get_stock_contracts()
 # 90-day window): the range is derived from the contracts themselves.
 contracts = shioaji.get_futures_contracts()
 calendar = finmind.get_trading_dates_covering("2026-09-17", contracts["delivery_date"])
+
+# TAIEX constituent weights for the 臺指期 page (type == "twse" only; TPEx's
+# own index has its own constituents). Cached per day; a warm day needs no
+# token. Index is stock_id (str).
+weights = finmind.get_twii_weights("2026-09-16")
+weights.loc["2330", "weight_per"]
 
 # FinLab SSF reference columns for the last completed trading day (strictly
 # before today). The four tables must share one report_date or this raises

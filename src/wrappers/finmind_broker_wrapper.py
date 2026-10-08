@@ -1,3 +1,4 @@
+import datetime as dt
 import os
 import sys
 import tempfile
@@ -8,6 +9,13 @@ import pyarrow.parquet as pq
 from FinMind.data import DataLoader
 
 from .finmind_rate_limit import FinMindRateLimiter, batch_size
+
+TAIPEI = dt.timezone(dt.timedelta(hours=8))
+
+# taiwan_stock_market_value_weight()'s own columns (rank, stock_name, type
+# dropped): weight_per is % of the index's market value, date is the
+# publication's own as-of date (a string, "YYYY-MM-DD").
+WEIGHT_COLUMNS = ["stock_id", "weight_per", "date"]
 
 # Column order of the archive; a window is read as one multi-file scan, so a
 # written day must not reshuffle it.
@@ -182,6 +190,67 @@ class FinMindWrapper:
         """
         start, end = self.calendar_range_covering(start_date, delivery_dates, margin_days)
         return self.get_trading_dates(start, end)
+
+    # ------------------------------------------------------------------
+    # 加權指數成分股權重 (TaiwanStockMarketValueWeight) -- cached per day,
+    # one row per TWSE-listed constituent (TPEx rows dropped: the 臺指期
+    # page only weights TAIEX, the TWSE index).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def weight_dir():
+        return os.environ.get(
+            "DATA_SDK_FINMIND_WEIGHT_PATH", "/mnt/nfs/backup/finmind_cache/twii_weight"
+        )
+
+    @staticmethod
+    def weight_cache_path(day, output_dir=None):
+        return os.path.join(output_dir or FinMindWrapper.weight_dir(), f"{day}.parquet")
+
+    @staticmethod
+    def _taipei_today_str():
+        return dt.datetime.now(TAIPEI).date().isoformat()
+
+    def get_twii_weights(self, day=None) -> pd.DataFrame:
+        """TAIEX constituent weights for ``day`` (default: today, Taipei).
+
+        Calls ``taiwan_stock_market_value_weight(start_date=day,
+        end_date=day)`` and keeps ``type == "twse"`` (TPEx's own index has
+        its own constituents; the 臺指期 page only needs TAIEX's). Returns
+        ``stock_id, weight_per, date`` indexed by ``stock_id`` (str).
+
+        This table changes once a day, so unlike the broker archive there is
+        no per-stock missing-cell detection: a cache hit for ``day`` is
+        served as is, and a miss does one fetch for the whole table. Cached
+        to ``DATA_SDK_FINMIND_WEIGHT_PATH`` (default
+        ``/mnt/nfs/backup/finmind_cache/twii_weight/<day>.parquet``); a warm
+        day needs no token, a cold one needs ``FINMIND_API_TOKEN`` and draws
+        from the shared ``limiter()``.
+        """
+        day = day or self._taipei_today_str()
+        path = self.weight_cache_path(day)
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return pd.read_parquet(path)
+
+        self.limiter().acquire(1)
+        raw = FinMindWrapper._api.taiwan_stock_market_value_weight(
+            start_date=day, end_date=day
+        )
+        frame = raw[raw["type"] == "twse"][WEIGHT_COLUMNS].copy()
+        frame["stock_id"] = frame["stock_id"].astype(str)
+        frame = frame.set_index("stock_id")
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".twii-weight-", suffix=".tmp")
+        os.close(fd)
+        try:
+            frame.to_parquet(tmp_path)
+            os.chmod(tmp_path, 0o644)
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        return frame
 
     # ------------------------------------------------------------------
     # Fetch surface -- used by the scheduled writer and the archive repair.
