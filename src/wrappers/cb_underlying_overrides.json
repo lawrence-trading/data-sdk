@@ -1,0 +1,4 @@
+{
+  "_readme": "手工表：CbInfoWrapper.get_cb_underlying_map() 的例外清單。cb_id 前 4 碼驗不過 ShioajiWrapper.get_stock_contracts()['code'] 的任何股票代碼時（即該次呼叫把這個 cb_id 標成 underlying_unresolved=True），人工查過真正的標的股票代號後在這裡補一筆 \"<cb_id>\": \"<stock_id>\"。驗得過前 4 碼的 cb_id 不需要出現在這裡。鍵名 _readme 不是一個 cb_id，讀取時會被忽略。",
+  "_comment_zh": "目前沒有任何已知例外；可轉債代碼的前 4 碼至今都等於它的標的股票代號。"
+}

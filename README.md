@@ -228,6 +228,21 @@ df_rev = tej.get_ewsale(min_date="2023-01-01")   # custom start for a cold fetch
 # (~157k rows, ~31% of the 500k/day row quota; not for a daily job).
 df_rev = tej.get_ewsale(refetch_since=TEJWrapper.EWSALE_MIN_DATE)
 
+# Convertible-bond reference data (可轉債頁; cached to disk, cold fetch
+# requires FINMIND_API_TOKEN). get_cb_daily_overview reads the last row
+# strictly before `day`, the same rule finlab_wrapper applies to FinLab's
+# own daily tables (duplicated, not shared -- different source).
+from data_sdk import CbInfoWrapper, CB_FACE_VALUE_NT
+
+cb = CbInfoWrapper()
+cb_info = cb.get_cb_info()                       # whole table, cached
+overview = cb.get_cb_daily_overview("2026-09-16")  # one row per cb_id
+# cb_id -> underlying stock_id, verified against real Shioaji stock codes
+# (never the unverified first-4-characters guess); unresolved ids get
+# underlying_stock_id=None, underlying_unresolved=True instead of a guess.
+underlying = cb.get_cb_underlying_map()
+face_value_nt = CB_FACE_VALUE_NT                 # 100, every CB, by owner decision
+
 # Fetch Taiwan warrant metadata (cached to disk, requires FINMIND_API_TOKEN)
 warrant_info = WarrantInfoWrapper(cache_dir=Path("/tmp/warrant_cache"))
 df_summary = warrant_info.get_warrant_summary()   # all warrants with strike/expiry

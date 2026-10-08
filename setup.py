@@ -5,6 +5,7 @@ setup(
     version="0.7.1",
     packages=["data_sdk", "data_sdk.crawlers", "data_sdk.wrappers"],
     package_dir={"data_sdk": "src"},
+    package_data={"data_sdk.wrappers": ["cb_underlying_overrides.json"]},
     install_requires=[
         "numba",
         "numpy",

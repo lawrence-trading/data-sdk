@@ -12,6 +12,7 @@ from .finlab_wrapper import FinLabWrapper, FinLabAlignmentError
 from .taifex_wrapper import TaifexWrapper, TaifexResponseError, taifex_prod_id
 from .market_calendar import MarketCalendar, HolidayEntry, UnknownCalendarYear
 from .disposition import DispositionList, DispositionEntry
+from .cb_info_wrapper import CbInfoWrapper, CB_FACE_VALUE_NT
 from .ssf_decimal_locator import (
     LocatorEntry,
     get_ssf_decimal_locator,
@@ -40,6 +41,8 @@ __all__ = [
     "UnknownCalendarYear",
     "DispositionList",
     "DispositionEntry",
+    "CbInfoWrapper",
+    "CB_FACE_VALUE_NT",
     "LocatorEntry",
     "get_ssf_decimal_locator",
     "price_raw_to_1e4",
