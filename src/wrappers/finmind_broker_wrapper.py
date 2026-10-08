@@ -17,6 +17,15 @@ TAIPEI = dt.timezone(dt.timedelta(hours=8))
 # publication's own as-of date (a string, "YYYY-MM-DD").
 WEIGHT_COLUMNS = ["stock_id", "weight_per", "date"]
 
+# docs/pages/tx.md §2.2: the table is read as "date <= day 裡最新的一筆",
+# never a single exact-day match -- TWSE's free-float reweighting does not
+# republish every day, so a bare single-day query routinely comes back
+# empty. This bounds how far back get_twii_weights looks for that latest
+# row; chosen generously (half a year) because the real cadence has not
+# been measured against a live account. Exceeding it raises rather than
+# guessing a wider window silently.
+WEIGHT_LOOKBACK_DAYS = 180
+
 # Column order of the archive; a window is read as one multi-file scan, so a
 # written day must not reshuffle it.
 BROKER_COLUMNS = [
@@ -212,18 +221,27 @@ class FinMindWrapper:
         return dt.datetime.now(TAIPEI).date().isoformat()
 
     def get_twii_weights(self, day=None) -> pd.DataFrame:
-        """TAIEX constituent weights for ``day`` (default: today, Taipei).
+        """TAIEX constituent weights, the latest published row with
+        ``date <= day`` (default: today, Taipei) -- ``docs/pages/tx.md``
+        §2.2's own rule, quoted there from this method.
 
-        Calls ``taiwan_stock_market_value_weight(start_date=day,
-        end_date=day)`` and keeps ``type == "twse"`` (TPEx's own index has
-        its own constituents; the 臺指期 page only needs TAIEX's). Returns
-        ``stock_id, weight_per, date`` indexed by ``stock_id`` (str).
+        This table does not republish every day (TWSE's free-float
+        reweighting is infrequent), so "no row dated exactly ``day``" is the
+        common case, not an error. Queries
+        ``taiwan_stock_market_value_weight`` over a trailing window ending
+        at ``day`` (``WEIGHT_LOOKBACK_DAYS`` back), filters to
+        ``type == "twse"`` (TPEx's own index has its own constituents; the
+        臺指期 page only needs TAIEX's), and keeps only the single most
+        recent ``date`` found in that window. Raises ``RuntimeError`` when
+        the whole window has no TWSE row -- this method never returns or
+        caches an empty frame. Returns ``stock_id, weight_per, date``
+        indexed by ``stock_id`` (str).
 
-        This table changes once a day, so unlike the broker archive there is
-        no per-stock missing-cell detection: a cache hit for ``day`` is
-        served as is, and a miss does one fetch for the whole table. Cached
-        to ``DATA_SDK_FINMIND_WEIGHT_PATH`` (default
-        ``/mnt/nfs/backup/finmind_cache/twii_weight/<day>.parquet``); a warm
+        Cached per requested ``day`` to ``DATA_SDK_FINMIND_WEIGHT_PATH``
+        (default ``/mnt/nfs/backup/finmind_cache/twii_weight/<day>.parquet``);
+        a cache file is only ever written for a non-empty result, so a
+        window that comes back empty is retried from the network on the
+        next call instead of freezing into a permanent empty read. A warm
         day needs no token, a cold one needs ``FINMIND_API_TOKEN`` and draws
         from the shared ``limiter()``.
         """
@@ -232,11 +250,23 @@ class FinMindWrapper:
         if os.path.isfile(path) and os.path.getsize(path) > 0:
             return pd.read_parquet(path)
 
+        start = (pd.Timestamp(day) - pd.Timedelta(days=WEIGHT_LOOKBACK_DAYS)).date().isoformat()
         self.limiter().acquire(1)
         raw = FinMindWrapper._api.taiwan_stock_market_value_weight(
-            start_date=day, end_date=day
+            start_date=start, end_date=day
         )
         frame = raw[raw["type"] == "twse"][WEIGHT_COLUMNS].copy()
+        if frame.empty:
+            raise RuntimeError(
+                f"no TAIEX weight row dated in [{start}, {day}] "
+                f"({WEIGHT_LOOKBACK_DAYS}-day window) -- weight table has "
+                "not published since before the window, or the window "
+                "itself needs widening"
+            )
+        # Dates are "YYYY-MM-DD" strings, so lexicographic max is
+        # chronological max; no parsing needed to pick the latest row.
+        latest_date = frame["date"].max()
+        frame = frame[frame["date"] == latest_date].copy()
         frame["stock_id"] = frame["stock_id"].astype(str)
         frame = frame.set_index("stock_id")
 

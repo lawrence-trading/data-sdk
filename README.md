@@ -176,8 +176,11 @@ contracts = shioaji.get_futures_contracts()
 calendar = finmind.get_trading_dates_covering("2026-09-17", contracts["delivery_date"])
 
 # TAIEX constituent weights for the 臺指期 page (type == "twse" only; TPEx's
-# own index has its own constituents). Cached per day; a warm day needs no
-# token. Index is stock_id (str).
+# own index has its own constituents). The latest published row with
+# date <= day -- the table does not republish every day, so a window
+# (WEIGHT_LOOKBACK_DAYS back) is searched, not a single exact-day match;
+# raises if the whole window is empty. Cached per requested day; a warm
+# day needs no token. Index is stock_id (str).
 weights = finmind.get_twii_weights("2026-09-16")
 weights.loc["2330", "weight_per"]
 
