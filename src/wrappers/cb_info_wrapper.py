@@ -12,7 +12,20 @@ layer that maps a CB's own code to its underlying stock:
                              ``finlab_wrapper.py`` applies to FinLab's daily
                              tables -- duplicated here, not imported, because
                              the source (FinMind) and its own date semantics
-                             are unrelated to FinLab's
+                             are unrelated to FinLab's. Confirmed live
+                             2026-10-09:
+                             ``taiwan_stock_convertible_bond_daily_overview()``
+                             with no ``start_date`` raises ("start_date
+                             parameter is missing"), and a ``start_date``/
+                             ``end_date`` range answers only ``start_date``'s
+                             own ~377-380 bonds (sometimes nothing at all) --
+                             never the other days in between. This method
+                             therefore queries one calendar date at a time
+                             (``start_date == end_date``) and walks backward
+                             from ``day`` minus one day until a date answers
+                             non-empty (``MAX_DAILY_OVERVIEW_LOOKBACK_DAYS``
+                             bound, skipping the empty weekend/holiday
+                             answers along the way).
     get_cb_underlying_map   cb_id -> underlying stock_id, verified against
                              Shioaji's real stock codes with a hand-written
                              override table for the rest (ISSUES.md I-216)
@@ -51,6 +64,14 @@ CB_DAILY_OVERVIEW_COLUMNS = [
     "OutstandingAmount", "PriceOfUnderlyingStock",
 ]
 
+# How many calendar days get_cb_daily_overview() will step backward from
+# day-1 looking for a non-empty answer before giving up. A few consecutive
+# empty days are an ordinary holiday cluster (confirmed live: a weekend
+# single-date query answers (0, 0), not an error); this bound is generous
+# enough to cross one (10 calendar days always contains at least a few
+# trading days) without retrying forever against a genuinely dead feed.
+MAX_DAILY_OVERVIEW_LOOKBACK_DAYS = 10
+
 _OVERRIDES_README_KEYS = {"_readme", "_comment_zh"}
 
 
@@ -72,7 +93,7 @@ class CbInfoWrapper:
         self,
         cache_dir: Optional[str] = None,
         fetch_info: Optional[Callable[[], pd.DataFrame]] = None,
-        fetch_daily_overview: Optional[Callable[[], pd.DataFrame]] = None,
+        fetch_daily_overview: Optional[Callable[[str], pd.DataFrame]] = None,
         get_stock_codes: Optional[Callable[[], Iterable[str]]] = None,
     ):
         # All three network-shaped dependencies are injectable so every test
@@ -127,7 +148,10 @@ class CbInfoWrapper:
         api.login_by_token(api_token=token)
         return api.taiwan_stock_convertible_bond_info()
 
-    def _default_fetch_daily_overview(self) -> pd.DataFrame:
+    def _default_fetch_daily_overview(self, query_date: str) -> pd.DataFrame:
+        """One calendar date's worth of bonds (``start_date == end_date ==
+        query_date``) -- see ``get_cb_daily_overview``'s docstring for why
+        this cannot be a single unbounded or ranged call."""
         token = os.environ.get("FINMIND_API_TOKEN")
         if not token:
             raise RuntimeError(
@@ -137,7 +161,9 @@ class CbInfoWrapper:
 
         api = DataLoader()
         api.login_by_token(api_token=token)
-        return api.taiwan_stock_convertible_bond_daily_overview()
+        return api.taiwan_stock_convertible_bond_daily_overview(
+            start_date=query_date, end_date=query_date
+        )
 
     # ------------------------------------------------------------------
     # Read surface
@@ -171,6 +197,18 @@ class CbInfoWrapper:
         applies to FinLab's daily tables, duplicated here because this
         table's source and date semantics are FinMind's own, not FinLab's.
 
+        Confirmed live 2026-10-09: FinMind's
+        ``taiwan_stock_convertible_bond_daily_overview()`` is not a
+        history table you can range-query -- it raises with no
+        ``start_date``, and a ``start_date``/``end_date`` range answers only
+        ``start_date``'s own day (sometimes nothing at all), never the days
+        after it. So this method cannot fetch once and filter locally the
+        way the FinLab daily tables do; it instead walks backward one
+        calendar date at a time from ``day`` minus one day
+        (``start_date == end_date`` each call) until a date answers
+        non-empty, skipping empty weekend/holiday days along the way, up to
+        ``MAX_DAILY_OVERVIEW_LOOKBACK_DAYS``.
+
         Columns: ``CB_DAILY_OVERVIEW_COLUMNS`` (cb_id, cb_name, date,
         ConversionPrice, InitialDateOfStopConversion,
         DueDateOfStopConversion, OutstandingAmount, PriceOfUnderlyingStock).
@@ -186,8 +224,29 @@ class CbInfoWrapper:
             return pd.read_parquet(path)
 
         fetch = self._fetch_daily_overview or self._default_fetch_daily_overview
-        raw = pd.DataFrame(fetch()).copy()
+        target = dt.date.fromisoformat(str(day))
+        tried: list[str] = []
+        raw = None
+        for offset in range(1, MAX_DAILY_OVERVIEW_LOOKBACK_DAYS + 1):
+            query_date = (target - dt.timedelta(days=offset)).isoformat()
+            tried.append(query_date)
+            candidate = pd.DataFrame(fetch(query_date))
+            if not candidate.empty:
+                raw = candidate
+                break
+        if raw is None:
+            raise RuntimeError(
+                f"CB daily overview has no row dated before {day} "
+                f"(queried {tried[0]} back to {tried[-1]}, all empty)"
+            )
+
+        raw = raw.copy()
         raw["date"] = pd.to_datetime(raw["date"])
+        # Each call above already asked for exactly one date strictly
+        # before `day`, so this is normally a no-op; it stays as a defensive
+        # filter in case FinMind ever answers a range again, and the
+        # groupby/idxmax below still protects against a duplicated row for
+        # the same cb_id on that one date.
         eligible = raw[raw["date"] < pd.Timestamp(day)]
         if eligible.empty:
             raise RuntimeError(f"CB daily overview has no row dated before {day}")

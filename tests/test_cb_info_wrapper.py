@@ -67,57 +67,103 @@ def test_get_cb_info_refresh_forces_a_cold_fetch(cache_dir):
     assert calls["n"] == 2
 
 
-def _overview_rows():
-    return pd.DataFrame(
-        [
-            {"cb_id": "95881", "cb_name": "大成鋼一", "date": "2026-09-14",
-             "ConversionPrice": 32.5, "InitialDateOfStopConversion": None,
-             "DueDateOfStopConversion": None, "OutstandingAmount": 400_000_000,
-             "PriceOfUnderlyingStock": 28.1},
-            {"cb_id": "95881", "cb_name": "大成鋼一", "date": "2026-09-15",
-             "ConversionPrice": 32.5, "InitialDateOfStopConversion": "2026-09-16",
-             "DueDateOfStopConversion": "2026-09-20", "OutstandingAmount": 400_000_000,
-             "PriceOfUnderlyingStock": 28.6},
-            # a row dated "today" or later must never be picked as the latest
-            {"cb_id": "95881", "cb_name": "大成鋼一", "date": "2026-09-16",
-             "ConversionPrice": 32.5, "InitialDateOfStopConversion": "2026-09-16",
-             "DueDateOfStopConversion": "2026-09-20", "OutstandingAmount": 999,
-             "PriceOfUnderlyingStock": 99.9},
-            {"cb_id": "61401", "cb_name": "大陸一", "date": "2026-09-15",
-             "ConversionPrice": 11.0, "InitialDateOfStopConversion": None,
-             "DueDateOfStopConversion": None, "OutstandingAmount": 200_000_000,
-             "PriceOfUnderlyingStock": 9.8},
-        ]
-    )
+def _overview_by_date():
+    """Models FinMind's real, confirmed-live (2026-10-09) behaviour: a
+    ``start_date == end_date`` query answers that ONE calendar date's whole
+    bond universe, and a date with no trading (weekend/holiday) answers
+    empty -- never a multi-day history in one call. ``2026-09-15`` is a
+    deliberate one-day gap (as if it were a holiday) so the walk-back has
+    to skip a day before finding ``2026-09-14``."""
+    return {
+        "2026-09-14": pd.DataFrame(
+            [
+                {"cb_id": "95881", "cb_name": "大成鋼一", "date": "2026-09-14",
+                 "ConversionPrice": 32.5, "InitialDateOfStopConversion": "2026-09-16",
+                 "DueDateOfStopConversion": "2026-09-20", "OutstandingAmount": 400_000_000,
+                 "PriceOfUnderlyingStock": 28.1},
+                {"cb_id": "61401", "cb_name": "大陸一", "date": "2026-09-14",
+                 "ConversionPrice": 11.0, "InitialDateOfStopConversion": None,
+                 "DueDateOfStopConversion": None, "OutstandingAmount": 200_000_000,
+                 "PriceOfUnderlyingStock": 9.8},
+            ]
+        ),
+        # a row dated "today" or later must never be picked as the latest
+        "2026-09-16": pd.DataFrame(
+            [
+                {"cb_id": "95881", "cb_name": "大成鋼一", "date": "2026-09-16",
+                 "ConversionPrice": 32.5, "InitialDateOfStopConversion": "2026-09-16",
+                 "DueDateOfStopConversion": "2026-09-20", "OutstandingAmount": 999,
+                 "PriceOfUnderlyingStock": 99.9},
+            ]
+        ),
+    }
 
 
-def test_get_cb_daily_overview_takes_the_latest_row_strictly_before_today(cache_dir):
-    wrapper = CbInfoWrapper(fetch_daily_overview=_overview_rows)
+def _fetch_by_date(by_date):
+    def fetch(query_date):
+        # FinMind's own answer for a date outside its table: an empty frame,
+        # not a missing key / exception.
+        return by_date.get(query_date, pd.DataFrame())
+
+    return fetch
+
+
+def test_get_cb_daily_overview_walks_back_past_an_empty_day_to_the_latest_real_one(cache_dir):
+    by_date = _overview_by_date()
+    calls = []
+
+    def fetch(query_date):
+        calls.append(query_date)
+        return by_date.get(query_date, pd.DataFrame())
+
+    wrapper = CbInfoWrapper(fetch_daily_overview=fetch)
     df = wrapper.get_cb_daily_overview(day="2026-09-16").set_index("cb_id")
 
+    # day-1 (09-15) is empty, like a real weekend/holiday answer -- the walk
+    # steps past it to day-2 (09-14), querying ONE date per call, never a range.
+    assert calls == ["2026-09-15", "2026-09-14"]
     assert list(df.reset_index().columns) == CB_DAILY_OVERVIEW_COLUMNS
-    assert df.loc["95881", "date"] == pd.Timestamp("2026-09-15")
+    assert df.loc["95881", "date"] == pd.Timestamp("2026-09-14")
     assert df.loc["95881", "InitialDateOfStopConversion"] == "2026-09-16"
     assert df.loc["95881", "OutstandingAmount"] == 400_000_000
-    assert df.loc["61401", "date"] == pd.Timestamp("2026-09-15")
+    assert df.loc["61401", "date"] == pd.Timestamp("2026-09-14")
 
 
 def test_get_cb_daily_overview_caches_per_day(cache_dir):
-    wrapper = CbInfoWrapper(fetch_daily_overview=_overview_rows)
+    wrapper = CbInfoWrapper(fetch_daily_overview=_fetch_by_date(_overview_by_date()))
     wrapper.get_cb_daily_overview(day="2026-09-16")
     assert (cache_dir / "cb_daily_overview" / "2026-09-16.parquet").is_file()
 
-    def refuse():
+    def refuse(query_date):
         raise AssertionError("a warm day must not re-fetch")
 
     warm = CbInfoWrapper(fetch_daily_overview=refuse).get_cb_daily_overview(day="2026-09-16")
     assert len(warm) == 2
 
 
-def test_get_cb_daily_overview_raises_without_any_row_before_the_day(cache_dir):
-    wrapper = CbInfoWrapper(fetch_daily_overview=_overview_rows)
+def test_get_cb_daily_overview_raises_after_exhausting_the_bounded_lookback(cache_dir):
+    # Every date this wrapper tries answers empty (a dead feed, not a
+    # holiday cluster) -- it must give up after the bound, not loop forever.
+    wrapper = CbInfoWrapper(fetch_daily_overview=_fetch_by_date({}))
     with pytest.raises(RuntimeError, match="no row dated before"):
-        wrapper.get_cb_daily_overview(day="2020-01-01")
+        wrapper.get_cb_daily_overview(day="2026-09-16")
+
+
+def test_get_cb_daily_overview_queries_single_dates_never_a_range(cache_dir):
+    """The underlying FinMind call must always be asked for exactly one
+    date (start_date == end_date) -- a range silently answers only its
+    first day (confirmed live 2026-10-09), so a fake that received a range
+    here instead of a bare date string would itself be modelling the bug
+    this fix exists to remove."""
+    seen = []
+
+    def fetch(query_date):
+        assert isinstance(query_date, str)
+        seen.append(query_date)
+        return _overview_by_date().get(query_date, pd.DataFrame())
+
+    CbInfoWrapper(fetch_daily_overview=fetch).get_cb_daily_overview(day="2026-09-16")
+    assert seen == ["2026-09-15", "2026-09-14"]
 
 
 # ---------------------------------------------------------------------
