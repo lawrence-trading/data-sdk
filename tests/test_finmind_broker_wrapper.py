@@ -8,17 +8,46 @@ import pytest
 from data_sdk.wrappers.finmind_broker_wrapper import FinMindWrapper
 
 
-def _fake_weight_frame():
-    return pd.DataFrame(
-        [
-            {"rank": 1, "stock_id": "2330", "stock_name": "台積電", "weight_per": 32.5,
-             "date": "2026-09-16", "type": "twse"},
-            {"rank": 2, "stock_id": "2317", "stock_name": "鴻海", "weight_per": 4.1,
-             "date": "2026-09-16", "type": "twse"},
-            {"rank": 1, "stock_id": "5380", "stock_name": "台塑化上櫃", "weight_per": 1.2,
-             "date": "2026-09-16", "type": "tpex"},
-        ]
-    )
+def _weight_row(stock_id, name, weight, date, kind="twse"):
+    return {"rank": 1, "stock_id": stock_id, "stock_name": name, "weight_per": weight,
+            "date": date, "type": kind}
+
+
+def _published_table():
+    """Two monthly TWSE publications (2026-08-31, 2026-09-30) plus daily TPEx
+    rows -- the dataset's real shape, observed 2026-10-09."""
+    return pd.DataFrame([
+        _weight_row("2330", "台積電", 32.1, "2026-08-31"),
+        _weight_row("2317", "鴻海", 4.0, "2026-08-31"),
+        _weight_row("2330", "台積電", 32.5, "2026-09-30"),
+        _weight_row("2317", "鴻海", 4.1, "2026-09-30"),
+        _weight_row("2454", "聯發科", 2.0, "2026-09-30"),
+        _weight_row("5380", "台塑化上櫃", 1.2, "2026-09-30", "tpex"),
+        _weight_row("5380", "台塑化上櫃", 1.3, "2026-10-08", "tpex"),
+    ])
+
+
+class _FakeWeightApi:
+    """Answers ``taiwan_stock_market_value_weight`` the way FinMind does: a
+    ``stock_id`` query returns that stock's rows across the range, an
+    all-stocks query returns one exact date, and an all-stocks date RANGE
+    comes back as an empty, column-less frame."""
+
+    def __init__(self, table):
+        self.table = table
+        self.calls = []
+
+    def taiwan_stock_market_value_weight(self, stock_id="", start_date="", end_date=""):
+        self.calls.append((stock_id, start_date, end_date))
+        t = self.table
+        if stock_id:
+            rows = t[(t["stock_id"] == stock_id) & (t["date"] >= start_date)
+                     & (t["date"] <= (end_date or start_date))]
+        elif end_date and end_date != start_date:
+            return pd.DataFrame()
+        else:
+            rows = t[t["date"] == start_date]
+        return rows.reset_index(drop=True) if len(rows) else pd.DataFrame()
 
 
 class _NullLimiter:
@@ -26,153 +55,128 @@ class _NullLimiter:
         pass
 
 
+def _install(monkeypatch, api):
+    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
+    monkeypatch.setattr(FinMindWrapper, "_api", api)
+    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
+    return api
+
+
 @pytest.fixture
-def wrapper(monkeypatch):
+def api(monkeypatch):
     """A wrapper whose shared client and rate limiter are stand-ins, so
     construction and a cold fetch never touch the network or a token."""
-    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
-    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(
-        taiwan_stock_market_value_weight=lambda start_date, end_date: _fake_weight_frame()
-    ))
-    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
-    return FinMindWrapper()
+    return _install(monkeypatch, _FakeWeightApi(_published_table()))
 
 
-def test_cold_fetch_keeps_only_twse_rows(wrapper, monkeypatch, tmp_path):
+def test_cold_fetch_keeps_only_twse_rows_of_the_latest_publication(api, monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
 
-    frame = wrapper.get_twii_weights(day="2026-09-16")
+    frame = FinMindWrapper().get_twii_weights(day="2026-10-08")
 
     assert frame.index.name == "stock_id"
-    assert sorted(frame.index) == ["2317", "2330"]
+    assert sorted(frame.index) == ["2317", "2330", "2454"]
     assert list(frame.columns) == ["weight_per", "date"]
     assert frame.loc["2330", "weight_per"] == 32.5
+    assert (frame["date"] == "2026-09-30").all()
 
 
-def test_cold_fetch_writes_the_cache_file(wrapper, monkeypatch, tmp_path):
+def test_the_all_stocks_query_names_one_exact_date_never_a_range(api, monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
 
-    wrapper.get_twii_weights(day="2026-09-16")
+    FinMindWrapper().get_twii_weights(day="2026-10-08")
 
-    path = tmp_path / "2026-09-16.parquet"
+    probe, fetch = api.calls
+    assert probe[0] == "2330" and probe[1] < "2026-10-08" and probe[2] == "2026-10-08"
+    assert fetch == ("", "2026-09-30", "2026-09-30")
+
+
+def test_cold_fetch_writes_the_cache_file(api, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
+
+    FinMindWrapper().get_twii_weights(day="2026-10-08")
+
+    path = tmp_path / "2026-10-08.parquet"
     assert path.is_file() and path.stat().st_size > 0
 
 
 def test_a_cached_day_is_served_without_touching_the_fake_api(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
-    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
 
-    def refuse(start_date, end_date):
-        raise AssertionError("the network must not be touched on a cached day")
+    class _Refuse:
+        def taiwan_stock_market_value_weight(self, **kwargs):
+            raise AssertionError("the network must not be touched on a cached day")
 
-    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(
-        taiwan_stock_market_value_weight=refuse
-    ))
-    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
+    _install(monkeypatch, _Refuse())
     cached = pd.DataFrame({"weight_per": [10.0]}, index=pd.Index(["2454"], name="stock_id"))
-    cached["date"] = "2026-09-16"
-    cached.to_parquet(tmp_path / "2026-09-16.parquet")
+    cached["date"] = "2026-09-30"
+    cached.to_parquet(tmp_path / "2026-10-08.parquet")
 
-    frame = FinMindWrapper().get_twii_weights(day="2026-09-16")
+    frame = FinMindWrapper().get_twii_weights(day="2026-10-08")
     assert frame.loc["2454", "weight_per"] == 10.0
 
 
-def test_default_day_is_todays_taipei_date(wrapper, monkeypatch, tmp_path):
+def test_default_day_is_todays_taipei_date(api, monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
-    monkeypatch.setattr(FinMindWrapper, "_taipei_today_str", staticmethod(lambda: "2026-09-16"))
+    monkeypatch.setattr(FinMindWrapper, "_taipei_today_str", staticmethod(lambda: "2026-10-08"))
 
-    wrapper.get_twii_weights()
+    FinMindWrapper().get_twii_weights()
 
-    assert (tmp_path / "2026-09-16.parquet").is_file()
-
-
-def _fake_weight_frame_stale(as_of):
-    """Same shape as _fake_weight_frame but published on an earlier date,
-    modelling the common case where the table has not republished since
-    before the requested day (docs/pages/tx.md §2.2: "date <= day 裡最新的
-    一筆")."""
-    return pd.DataFrame(
-        [
-            {"rank": 1, "stock_id": "2330", "stock_name": "台積電", "weight_per": 32.1,
-             "date": as_of, "type": "twse"},
-            {"rank": 2, "stock_id": "2317", "stock_name": "鴻海", "weight_per": 4.0,
-             "date": as_of, "type": "twse"},
-        ]
-    )
+    assert (tmp_path / "2026-10-08.parquet").is_file()
 
 
-def test_a_day_with_no_row_of_its_own_falls_back_to_the_latest_earlier_row(monkeypatch, tmp_path):
-    """Nothing published on "2026-09-30" itself -- the last real row, dated
-    "2026-08-14", is inside the lookback window and wins."""
+def test_a_publication_day_itself_uses_its_own_table(api, monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
-    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
-    seen_args = {}
-
-    def fetch(start_date, end_date):
-        seen_args["start_date"] = start_date
-        seen_args["end_date"] = end_date
-        return _fake_weight_frame_stale("2026-08-14")
-
-    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(
-        taiwan_stock_market_value_weight=fetch
-    ))
-    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
 
     frame = FinMindWrapper().get_twii_weights(day="2026-09-30")
 
-    # Queried a window ending at day, not a single exact-day match.
-    assert seen_args["end_date"] == "2026-09-30"
-    assert seen_args["start_date"] < "2026-09-30"
+    assert (frame["date"] == "2026-09-30").all()
+
+
+def test_a_day_between_publications_uses_the_earlier_one(api, monkeypatch, tmp_path):
+    """Nothing published between 2026-08-31 and 2026-09-30: a day in that
+    gap reads the 2026-08-31 table, never the later one."""
+    monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
+
+    frame = FinMindWrapper().get_twii_weights(day="2026-09-15")
+
     assert sorted(frame.index) == ["2317", "2330"]
-    assert (frame["date"] == "2026-08-14").all()
+    assert (frame["date"] == "2026-08-31").all()
     # Cached under the requested day, so a second call for the same day
     # is a cache hit even though the row itself is dated earlier.
-    assert (tmp_path / "2026-09-30.parquet").is_file()
+    assert (tmp_path / "2026-09-15.parquet").is_file()
 
 
-def test_an_empty_window_raises_and_writes_no_cache_file(monkeypatch, tmp_path):
+def test_no_publication_in_the_window_raises_and_writes_no_cache_file(monkeypatch, tmp_path):
     """No row anywhere in the lookback window: this must surface as a loud
     failure, never a silently cached empty frame that every later caller on
     the same day would keep reading back as "zero weighted constituents"."""
     monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
-    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
-    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(
-        taiwan_stock_market_value_weight=lambda start_date, end_date: pd.DataFrame(
-            columns=["rank", "stock_id", "stock_name", "weight_per", "date", "type"]
-        )
-    ))
-    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
+    _install(monkeypatch, _FakeWeightApi(_published_table()[lambda t: t["type"] == "tpex"]))
 
     with pytest.raises(RuntimeError, match="no TAIEX weight row"):
-        FinMindWrapper().get_twii_weights(day="2026-09-30")
+        FinMindWrapper().get_twii_weights(day="2026-10-08")
 
-    assert not (tmp_path / "2026-09-30.parquet").exists()
+    assert not (tmp_path / "2026-10-08.parquet").exists()
 
 
-def test_only_the_single_latest_date_in_the_window_is_kept(monkeypatch, tmp_path):
-    """A window spanning two different published dates keeps only the rows
-    of the most recent one, never a mix of two different as-of dates."""
+def test_a_listed_date_whose_table_has_no_twse_rows_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_SDK_FINMIND_WEIGHT_PATH", str(tmp_path))
-    monkeypatch.setattr(FinMindWrapper, "__init__", lambda self: None)
+    api = _FakeWeightApi(_published_table())
+    original = api.taiwan_stock_market_value_weight
 
-    def fetch(start_date, end_date):
-        return pd.concat([
-            _fake_weight_frame_stale("2026-07-01"),
-            pd.DataFrame([
-                {"rank": 1, "stock_id": "2454", "stock_name": "聯發科",
-                 "weight_per": 2.0, "date": "2026-09-01", "type": "twse"},
-            ]),
-        ], ignore_index=True)
+    def probe_only(stock_id="", start_date="", end_date=""):
+        if stock_id:
+            return original(stock_id=stock_id, start_date=start_date, end_date=end_date)
+        return pd.DataFrame()
 
-    monkeypatch.setattr(FinMindWrapper, "_api", types.SimpleNamespace(
-        taiwan_stock_market_value_weight=fetch
-    ))
-    monkeypatch.setattr(FinMindWrapper, "limiter", classmethod(lambda cls: _NullLimiter()))
+    api.taiwan_stock_market_value_weight = probe_only
+    _install(monkeypatch, api)
 
-    frame = FinMindWrapper().get_twii_weights(day="2026-09-30")
+    with pytest.raises(RuntimeError, match="no TAIEX weight row in FinMind's 2026-09-30 table"):
+        FinMindWrapper().get_twii_weights(day="2026-10-08")
 
-    assert sorted(frame.index) == ["2454"]
-    assert (frame["date"] == "2026-09-01").all()
+    assert not (tmp_path / "2026-10-08.parquet").exists()
 
 
 def _fake_daily_frame(rows):

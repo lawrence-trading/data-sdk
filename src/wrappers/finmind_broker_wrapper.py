@@ -16,6 +16,9 @@ TAIPEI = dt.timezone(dt.timedelta(hours=8))
 # dropped): weight_per is % of the index's market value, date is the
 # publication's own as-of date (a string, "YYYY-MM-DD").
 WEIGHT_COLUMNS = ["stock_id", "weight_per", "date"]
+# Always a TAIEX constituent (the largest weight by far), so its own
+# weight history lists every TWSE publication date in a window.
+WEIGHT_PROBE_STOCK = "2330"
 
 # docs/pages/tx.md §2.2: the table is read as "date <= day 裡最新的一筆",
 # never a single exact-day match -- TWSE's free-float reweighting does not
@@ -230,25 +233,28 @@ class FinMindWrapper:
         ``date <= day`` (default: today, Taipei) -- ``docs/pages/tx.md``
         §2.2's own rule, quoted there from this method.
 
-        This table does not republish every day (TWSE's free-float
-        reweighting is infrequent), so "no row dated exactly ``day``" is the
-        common case, not an error. Queries
-        ``taiwan_stock_market_value_weight`` over a trailing window ending
-        at ``day`` (``WEIGHT_LOOKBACK_DAYS`` back), filters to
-        ``type == "twse"`` (TPEx's own index has its own constituents; the
-        臺指期 page only needs TAIEX's), and keeps only the single most
-        recent ``date`` found in that window. Raises ``RuntimeError`` when
-        the whole window has no TWSE row -- this method never returns or
-        caches an empty frame. Returns ``stock_id, weight_per, date``
-        indexed by ``stock_id`` (str).
+        FinMind's ``taiwan_stock_market_value_weight`` publishes the TWSE
+        table once a month, on the month's last trading day (the TPEx rows
+        in the same dataset are daily), and answers an all-stocks query
+        only for one exact date -- a date range without ``stock_id`` comes
+        back empty. So this asks twice: ``WEIGHT_PROBE_STOCK``'s own weight
+        history over a trailing window ending at ``day``
+        (``WEIGHT_LOOKBACK_DAYS`` back) names the latest TWSE publication
+        date ``<= day``, then that one date is fetched for every stock and
+        filtered to ``type == "twse"`` (TPEx's own index has its own
+        constituents; the 臺指期 page only needs TAIEX's). Raises
+        ``RuntimeError`` when the window has no TWSE publication or that
+        date's table comes back without TWSE rows -- this method never
+        returns or caches an empty frame. Returns ``stock_id, weight_per,
+        date`` indexed by ``stock_id`` (str).
 
         Cached per requested ``day`` to ``DATA_SDK_FINMIND_WEIGHT_PATH``
         (default ``/mnt/nfs/backup/finmind_cache/twii_weight/<day>.parquet``);
         a cache file is only ever written for a non-empty result, so a
-        window that comes back empty is retried from the network on the
-        next call instead of freezing into a permanent empty read. A warm
-        day needs no token, a cold one needs ``FINMIND_API_TOKEN`` and draws
-        from the shared ``limiter()``.
+        failed lookup is retried from the network on the next call instead
+        of freezing into a permanent empty read. A warm day needs no token,
+        a cold one needs ``FINMIND_API_TOKEN`` and draws two requests from
+        the shared ``limiter()``.
         """
         day = day or self._taipei_today_str()
         path = self.weight_cache_path(day)
@@ -257,21 +263,36 @@ class FinMindWrapper:
 
         start = (pd.Timestamp(day) - pd.Timedelta(days=WEIGHT_LOOKBACK_DAYS)).date().isoformat()
         self.limiter().acquire(1)
-        raw = FinMindWrapper._api.taiwan_stock_market_value_weight(
-            start_date=start, end_date=day
+        probe = FinMindWrapper._api.taiwan_stock_market_value_weight(
+            stock_id=WEIGHT_PROBE_STOCK, start_date=start, end_date=day
         )
-        frame = raw[raw["type"] == "twse"][WEIGHT_COLUMNS].copy()
-        if frame.empty:
+        published = (
+            probe.loc[(probe["type"] == "twse") & (probe["date"] <= day), "date"]
+            if {"type", "date"} <= set(probe.columns) else pd.Series(dtype=str)
+        )
+        if published.empty:
             raise RuntimeError(
                 f"no TAIEX weight row dated in [{start}, {day}] "
-                f"({WEIGHT_LOOKBACK_DAYS}-day window) -- weight table has "
-                "not published since before the window, or the window "
-                "itself needs widening"
+                f"({WEIGHT_LOOKBACK_DAYS}-day window, probed through "
+                f"{WEIGHT_PROBE_STOCK}) -- the TWSE table has not published "
+                "since before the window"
             )
         # Dates are "YYYY-MM-DD" strings, so lexicographic max is
         # chronological max; no parsing needed to pick the latest row.
-        latest_date = frame["date"].max()
-        frame = frame[frame["date"] == latest_date].copy()
+        latest_date = published.max()
+
+        self.limiter().acquire(1)
+        raw = FinMindWrapper._api.taiwan_stock_market_value_weight(
+            start_date=latest_date, end_date=latest_date
+        )
+        if not {"type", "date"} <= set(raw.columns):
+            raw = pd.DataFrame(columns=["type", *WEIGHT_COLUMNS])
+        frame = raw[(raw["type"] == "twse") & (raw["date"] == latest_date)][WEIGHT_COLUMNS].copy()
+        if frame.empty:
+            raise RuntimeError(
+                f"no TAIEX weight row in FinMind's {latest_date} table although "
+                f"{WEIGHT_PROBE_STOCK}'s history lists that date"
+            )
         frame["stock_id"] = frame["stock_id"].astype(str)
         frame = frame.set_index("stock_id")
 
