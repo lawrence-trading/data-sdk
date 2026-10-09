@@ -259,7 +259,11 @@ df_rev = tej.get_ewsale(refetch_since=TEJWrapper.EWSALE_MIN_DATE)
 # Convertible-bond reference data (可轉債頁; cached to disk, cold fetch
 # requires FINMIND_API_TOKEN). get_cb_daily_overview reads the last row
 # strictly before `day`, the same rule finlab_wrapper applies to FinLab's
-# own daily tables (duplicated, not shared -- different source).
+# own daily tables (duplicated, not shared -- different source). FinMind's
+# own API answers only a single start_date==end_date query (a range answers
+# just that first day, confirmed live), so this walks backward one calendar
+# date at a time (bounded by MAX_DAILY_OVERVIEW_LOOKBACK_DAYS) rather than
+# fetching once and filtering a local frame.
 from data_sdk import CbInfoWrapper, CB_FACE_VALUE_NT
 
 cb = CbInfoWrapper()
