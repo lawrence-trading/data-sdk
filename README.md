@@ -125,6 +125,7 @@ export DATA_SDK_FINMIND_RATE_MARGIN=0.7   # fraction of the quota actually used
 ```python
 from data_sdk import (
     FinLabWrapper,
+    FinMindCalendar,
     FinMindWrapper,
     MarketCalendar,
     ShioajiWrapper,
@@ -210,11 +211,27 @@ as_of, paused = taifex.get_ssf_trade_pause()             # 商品類別 == '股�
 # is_trading_day/closure read a Sat/Sun-closed weekday rule overridden by
 # TWSE's announced exceptions; a year TWSE has not published yet raises
 # UnknownCalendarYear instead of silently treating every weekday as open.
+# Demoted to a display-label source only (taiwan_dashboard ISSUES.md I-255):
+# FinMindCalendar below is the one that decides trading/not now.
 calendar = MarketCalendar()
 calendar.is_trading_day("2026-09-25")       # False (中秋節)
 calendar.closure("2026-09-25")              # "中秋節"; None on a trading day
 calendar.next_trading_day("2026-09-25")     # "2026-09-29"
 calendar.export_range("2026-09-25", "2026-09-29")  # [{"date", "trading_day", "closure"}, ...]
+
+# FinMind's taiwan_stock_trading_date (taiwan_dashboard's single source of
+# truth for "is today a trading day", ISSUES.md I-255), same read surface as
+# MarketCalendar above, cached one JSON file per year under
+# DATA_SDK_FINMIND_CALENDAR_CACHE_PATH. A closed weekday's closure() name is
+# borrowed from a MarketCalendar ONLY when it also calls that day closed and
+# has a name for it (weekends are always "週末", an unnamed/disagreeing
+# weekday is "休市") -- TWSE never decides trading/not here. FinMind only
+# reaches the end of the current year; asking past that raises
+# FinMindUnknownCalendarYear, same contract as MarketCalendar's own.
+finmind_calendar = FinMindCalendar()
+finmind_calendar.is_trading_day("2026-09-25")      # False, decided by FinMind alone
+finmind_calendar.closure("2026-09-25")             # "中秋節" (borrowed from MarketCalendar)
+finmind_calendar.export_range("2026-09-25", "2026-09-29")  # same row shape as MarketCalendar
 
 # Frozen per-product decimal locator and tick (ssf_dashboard/docs/spec.md §8.1
 # in the taiwan_dashboard monorepo). None means the product was never
