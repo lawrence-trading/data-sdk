@@ -32,12 +32,17 @@ ISSUES.md I-268: a *past* year's cache, once written, is never touched again
 year is different: FinMind corrects it during the year itself (a makeup
 workday or a typhoon day off announced after the year's calendar was first
 cached), so its cache is revalidated at most once a day
-(``CURRENT_YEAR_REVALIDATE_INTERVAL``) -- the next call for the current year
-made 24+ hours after the cache file's own mtime refetches it. A refetch
-that fails (unreachable network) or comes back with no rows (FinMind
-answering empty for a year it has already published, which never happens
-for a legitimate reason) keeps serving the existing cached copy and logs
-why; it never raises and never discards a cache that is still the best
+(``CURRENT_YEAR_REVALIDATE_INTERVAL``) -- this instance's *first* call for
+the current year, if made 24+ hours after the cache file's own mtime,
+refetches it; every call after that is served from this instance's own
+in-memory copy without checking the file's age again, so a long-lived
+instance only ever revalidates once. Each of the two production call sites
+(``backend/app/preopen/job.py``) constructs a fresh ``FinMindCalendar`` per
+invocation, so in practice every invocation does see the staleness check.
+A refetch that fails (unreachable network) or comes back with no rows
+(FinMind answering empty for a year it has already published, which never
+happens for a legitimate reason) keeps serving the existing cached copy and
+logs why; it never raises and never discards a cache that is still the best
 information available. Only the current year's own cache file's mtime is
 touched this way -- a past year is cached forever, exactly as before.
 
@@ -231,8 +236,11 @@ class FinMindCalendar:
         rows at all for the year (not published yet); that response is
         never cached, so the next call asks the network again.
 
-        ISSUES.md I-268: when ``year`` is the current year (per ``now``) and
-        its cache file is older than ``CURRENT_YEAR_REVALIDATE_INTERVAL``,
+        ISSUES.md I-268: the in-memory cache below is checked first, so this
+        only runs the staleness check on this instance's *first* call for
+        ``year`` -- a long-lived instance never re-checks after that. When
+        ``year`` is the current year (per ``now``) and its cache file is
+        older than ``CURRENT_YEAR_REVALIDATE_INTERVAL`` at that first call,
         this refetches before serving it -- a refetch failure (network, or
         an empty response) keeps the existing cached copy and logs why,
         rather than raising or discarding it. A past year's cache is never

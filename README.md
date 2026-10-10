@@ -231,7 +231,9 @@ calendar.export_range("2026-09-25", "2026-09-29")  # [{"date", "trading_day", "c
 # trading/not here. FinMind only reaches the end of the current year; asking
 # past that raises FinMindUnknownCalendarYear, same contract as
 # MarketCalendar's own. The CURRENT year's cache is revalidated at most once
-# a day (its file older than 24h triggers a refetch on the next call,
+# a day: a freshly constructed FinMindCalendar whose cache file is older
+# than 24h refetches on its first call for that year (an instance kept
+# alive across days only ever revalidates once, on that first call --
 # ISSUES.md I-268) so a same-year FinMind correction (a makeup workday, a
 # typhoon day off) is picked up within a day; a failed revalidation keeps
 # serving the existing cache and logs why. A PAST year's cache, once
