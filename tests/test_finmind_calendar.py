@@ -10,6 +10,7 @@ deciding a day TWSE calls open, and TWSE's label being unavailable.
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -298,3 +299,92 @@ def test_a_corrupt_cache_file_is_fetched_again_and_replaced(cache_dir, caplog):
 
 def test_constructing_a_calendar_never_fetches(cache_dir):
     FinMindCalendar(_refusing_fetcher)  # no call made yet -- would raise if it fetched eagerly
+
+
+# ----------------------------------------------------------------------
+# ISSUES.md I-268: the current year's cache is revalidated once a day;
+# past years are cached forever regardless of age.
+# ----------------------------------------------------------------------
+
+
+def _backdate(path: Path, now: dt.datetime, hours_ago: float) -> None:
+    """Sets *path*'s mtime to *hours_ago* hours before *now* -- standing in
+    for time actually passing, so these tests never sleep."""
+    stamp = now.timestamp() - hours_ago * 3600
+    os.utime(path, (stamp, stamp))
+
+
+def test_current_year_cache_is_revalidated_once_the_interval_has_passed(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)  # older than CURRENT_YEAR_REVALIDATE_INTERVAL
+
+    # FinMind corrected the day between the two calls (a makeup workday
+    # cancelled, say) -- the revalidating call must see the correction.
+    fetcher, calls = _counting(lambda s, e: _frame(["2026-06-02"]))
+    second = FinMindCalendar(fetcher, now=lambda: now)
+    assert second.is_trading_day("2026-06-01") is False
+    assert second.is_trading_day("2026-06-02") is True
+    assert len(calls) == 1
+    assert json.loads(path.read_text("utf-8")) == ["2026-06-02"]
+
+
+def test_current_year_cache_is_not_revalidated_before_the_interval(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=23)  # under the interval
+
+    second = FinMindCalendar(_refusing_fetcher, now=lambda: now)
+    assert second.is_trading_day("2026-06-01") is True  # still the cached answer, unrevalidated
+
+
+def test_a_past_years_cache_is_never_revalidated_however_old(cache_dir):
+    cached_at = dt.datetime(2024, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2024-06-01"]), now=lambda: cached_at)
+    assert first.is_trading_day("2024-06-01") is True
+    path = cache_dir / "2024.json"
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)  # "now" is two years later -- 2024 is a past year
+    _backdate(path, now, hours_ago=400 * 24)  # far older than the daily interval
+
+    second = FinMindCalendar(_refusing_fetcher, now=lambda: now)
+    assert second.is_trading_day("2024-06-01") is True  # would have raised if it refetched
+
+
+def test_revalidation_failure_keeps_the_cached_copy_and_says_so(cache_dir, caplog):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    def _unreachable(start_date, end_date):
+        raise RuntimeError("network down")
+
+    second = FinMindCalendar(_unreachable, now=lambda: now)
+    with caplog.at_level("WARNING"):
+        assert second.is_trading_day("2026-06-01") is True  # the stale-but-only copy still serves
+    assert "revalidation failed" in caplog.text
+    assert json.loads(path.read_text("utf-8")) == ["2026-06-01"]  # never overwritten
+
+
+def test_revalidation_with_no_rows_keeps_the_cached_copy_and_says_so(cache_dir, caplog):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    second = FinMindCalendar(lambda s, e: _frame([]), now=lambda: now)
+    with caplog.at_level("WARNING"):
+        assert second.is_trading_day("2026-06-01") is True
+    assert "revalidation returned no rows" in caplog.text
+    assert json.loads(path.read_text("utf-8")) == ["2026-06-01"]  # never overwritten
+
+
+def test_now_defaults_to_the_real_clock(cache_dir):
+    calendar = FinMindCalendar(_refusing_fetcher)
+    assert abs((calendar._now() - dt.datetime.now()).total_seconds()) < 5

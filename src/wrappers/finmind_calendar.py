@@ -24,7 +24,22 @@ under ``DATA_SDK_FINMIND_CALENDAR_CACHE_PATH`` (default
 ``$XDG_CACHE_HOME/data_sdk/finmind_calendar``, ``~/.cache/...`` when unset
 -- the same convention, and a few kilobytes a year, as ``MarketCalendar``'s
 own cache). A cache that cannot be written is logged and skipped, not
-fatal; a corrupt cache file is refetched and replaced.
+fatal; a corrupt cache file is refetched and replaced. Clear a year's cache
+by deleting its file; the whole cache is just that one directory.
+
+ISSUES.md I-268: a *past* year's cache, once written, is never touched again
+-- FinMind does not retroactively edit a year that is over. The *current*
+year is different: FinMind corrects it during the year itself (a makeup
+workday or a typhoon day off announced after the year's calendar was first
+cached), so its cache is revalidated at most once a day
+(``CURRENT_YEAR_REVALIDATE_INTERVAL``) -- the next call for the current year
+made 24+ hours after the cache file's own mtime refetches it. A refetch
+that fails (unreachable network) or comes back with no rows (FinMind
+answering empty for a year it has already published, which never happens
+for a legitimate reason) keeps serving the existing cached copy and logs
+why; it never raises and never discards a cache that is still the best
+information available. Only the current year's own cache file's mtime is
+touched this way -- a past year is cached forever, exactly as before.
 
 Callers that need to keep running on an unreachable or unpublished calendar
 apply the weekday rule themselves and say so, exactly as for
@@ -116,17 +131,29 @@ class FinMindCalendar:
     lazily) consulted ONLY for a closed weekday's display name; it never
     decides whether a day trades, and any failure reading it -- including
     its own ``UnknownCalendarYear`` -- is caught and logged, falling back
-    to the generic label rather than propagating.
+    to the generic label rather than propagating. ``now`` is the clock used
+    to decide which year is "current" (for ISSUES.md I-268's daily cache
+    revalidation) and how old the current year's cache file is; injectable
+    for tests, defaults to ``datetime.datetime.now``.
     """
+
+    # ISSUES.md I-268: how long the current year's cache is trusted before
+    # the next call refetches it. Chosen so the calendar can self-correct
+    # for a same-year announcement (a makeup workday, a typhoon day off)
+    # within one day, without refetching on every single call.
+    CURRENT_YEAR_REVALIDATE_INTERVAL = dt.timedelta(hours=24)
 
     def __init__(
         self,
         trading_dates_fetcher: Optional[Callable[[str, str], object]] = None,
         holiday_calendar: Optional[object] = None,
+        *,
+        now: Optional[Callable[[], dt.datetime]] = None,
     ):
         self._fetch = trading_dates_fetcher
         self._holiday_calendar = holiday_calendar
         self._year_cache: Dict[int, frozenset] = {}
+        self._now = now or dt.datetime.now
 
     # ------------------------------------------------------------------
     # Lazy collaborators
@@ -203,29 +230,69 @@ class FinMindCalendar:
         Raises ``FinMindUnknownCalendarYear`` when FinMind answers with no
         rows at all for the year (not published yet); that response is
         never cached, so the next call asks the network again.
+
+        ISSUES.md I-268: when ``year`` is the current year (per ``now``) and
+        its cache file is older than ``CURRENT_YEAR_REVALIDATE_INTERVAL``,
+        this refetches before serving it -- a refetch failure (network, or
+        an empty response) keeps the existing cached copy and logs why,
+        rather than raising or discarding it. A past year's cache is never
+        revalidated: once written, it is read back as-is forever.
         """
         if year in self._year_cache:
             return self._year_cache[year]
-        cached = self._read_cached(self.cache_path(year))
+        path = self.cache_path(year)
+        cached = self._read_cached(path)
         if cached is not None:
+            if year == self._now().year and self._current_year_cache_is_stale(path):
+                refetched = self._revalidate(year, path)
+                if refetched is not None:
+                    self._year_cache[year] = refetched
+                    return refetched
             dates = frozenset(cached)
             self._year_cache[year] = dates
             return dates
-        frame = self._fetcher()(f"{year}-01-01", f"{year}-12-31")
-        dates_list = sorted(set(_dates_from_frame(frame)))
+        dates_list = self._fetch_year(year)
         if not dates_list:
             raise FinMindUnknownCalendarYear(year)
-        try:
-            self._write_atomic(
-                json.dumps(dates_list, ensure_ascii=False).encode("utf-8"), self.cache_path(year)
-            )
-        except OSError as exc:
-            logger.warning(
-                "finmind calendar %d not cached at %s: %s", year, self.cache_path(year), exc
-            )
+        self._write_cache(year, dates_list, path)
         dates = frozenset(dates_list)
         self._year_cache[year] = dates
         return dates
+
+    def _fetch_year(self, year: int) -> List[str]:
+        frame = self._fetcher()(f"{year}-01-01", f"{year}-12-31")
+        return sorted(set(_dates_from_frame(frame)))
+
+    def _write_cache(self, year: int, dates_list: List[str], path: str) -> None:
+        try:
+            self._write_atomic(json.dumps(dates_list, ensure_ascii=False).encode("utf-8"), path)
+        except OSError as exc:
+            logger.warning("finmind calendar %d not cached at %s: %s", year, path, exc)
+
+    def _current_year_cache_is_stale(self, path: str) -> bool:
+        try:
+            age = self._now().timestamp() - os.path.getmtime(path)
+        except OSError:
+            return True
+        return age >= self.CURRENT_YEAR_REVALIDATE_INTERVAL.total_seconds()
+
+    def _revalidate(self, year: int, path: str) -> Optional[frozenset]:
+        """Refetches the current year for ISSUES.md I-268; ``None`` (keep the
+        existing cache) on any failure, logged either way."""
+        try:
+            dates_list = self._fetch_year(year)
+        except Exception as exc:  # noqa: BLE001 -- keep the cached copy on ANY failure
+            logger.warning(
+                "finmind calendar %d revalidation failed, keeping cached copy: %s", year, exc
+            )
+            return None
+        if not dates_list:
+            logger.warning(
+                "finmind calendar %d revalidation returned no rows, keeping cached copy", year
+            )
+            return None
+        self._write_cache(year, dates_list, path)
+        return frozenset(dates_list)
 
     # ------------------------------------------------------------------
     # Read surface -- same shape as MarketCalendar
