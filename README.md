@@ -83,6 +83,7 @@ export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"  # defaults to t
 export DATA_SDK_FINLAB_CACHE_PATH="/mnt/nfs/backup/finlab_cache"    # defaults to this path if unset
 export DATA_SDK_TAIFEX_CACHE_PATH="/mnt/nfs/backup/taifex_cache"    # defaults to this path if unset
 export DATA_SDK_MARKET_CALENDAR_CACHE_PATH="$HOME/.cache/data_sdk/market_calendar"  # default: $XDG_CACHE_HOME/data_sdk/market_calendar, else ~/.cache/data_sdk/market_calendar
+export DATA_SDK_FINMIND_CALENDAR_CACHE_PATH="$HOME/.cache/data_sdk/finmind_calendar"  # default: $XDG_CACHE_HOME/data_sdk/finmind_calendar, else ~/.cache/data_sdk/finmind_calendar; one JSON file per year, `rm` a year's file (or the whole directory) to clear it -- see "FinMind's taiwan_stock_trading_date" below
 export DATA_SDK_FINMIND_WEIGHT_PATH="/mnt/nfs/backup/finmind_cache/twii_weight"     # defaults to this path if unset
 export DATA_SDK_CB_CACHE_PATH="/mnt/nfs/backup/finmind_cache/cb"                    # defaults to this path if unset
 ```
@@ -222,12 +223,19 @@ calendar.export_range("2026-09-25", "2026-09-29")  # [{"date", "trading_day", "c
 # FinMind's taiwan_stock_trading_date (taiwan_dashboard's single source of
 # truth for "is today a trading day", ISSUES.md I-255), same read surface as
 # MarketCalendar above, cached one JSON file per year under
-# DATA_SDK_FINMIND_CALENDAR_CACHE_PATH. A closed weekday's closure() name is
-# borrowed from a MarketCalendar ONLY when it also calls that day closed and
-# has a name for it (weekends are always "週末", an unnamed/disagreeing
-# weekday is "休市") -- TWSE never decides trading/not here. FinMind only
-# reaches the end of the current year; asking past that raises
-# FinMindUnknownCalendarYear, same contract as MarketCalendar's own.
+# DATA_SDK_FINMIND_CALENDAR_CACHE_PATH (rm a year's <year>.json, or the whole
+# directory, to clear it -- the next call just refetches and rebuilds it). A
+# closed weekday's closure() name is borrowed from a MarketCalendar ONLY when
+# it also calls that day closed and has a name for it (weekends are always
+# "週末", an unnamed/disagreeing weekday is "休市") -- TWSE never decides
+# trading/not here. FinMind only reaches the end of the current year; asking
+# past that raises FinMindUnknownCalendarYear, same contract as
+# MarketCalendar's own. The CURRENT year's cache is revalidated at most once
+# a day (its file older than 24h triggers a refetch on the next call,
+# ISSUES.md I-268) so a same-year FinMind correction (a makeup workday, a
+# typhoon day off) is picked up within a day; a failed revalidation keeps
+# serving the existing cache and logs why. A PAST year's cache, once
+# written, is never revalidated or refetched.
 finmind_calendar = FinMindCalendar()
 finmind_calendar.is_trading_day("2026-09-25")      # False, decided by FinMind alone
 finmind_calendar.closure("2026-09-25")             # "中秋節" (borrowed from MarketCalendar)
