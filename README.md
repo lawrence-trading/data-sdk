@@ -248,9 +248,14 @@ calendar.export_range("2026-09-25", "2026-09-29")  # [{"date", "trading_day", "c
 # still retries instead of serving the stale cache for the rest of the 24h
 # (ISSUES.md I-280). Two processes constructing a FinMindCalendar close to
 # the same moment (the deploy script and the pre-open job, say) share an
-# advisory lock on a sibling <year>.json.lock file (fcntl.flock,
-# non-blocking) so only one of them actually revalidates -- the other
-# serves the existing cache without fetching (ISSUES.md I-283). rm just the
+# advisory lock on a sibling <year>.json.lock file (fcntl.flock) so only one
+# of them actually revalidates -- the other waits for it with a bounded
+# deadline (LOCK_WAIT_TIMEOUT, 2s by default) and then, either way -- it got
+# the lock once the winner released it, or the deadline ran out first --
+# reads the cache file fresh off disk rather than answering from whatever it
+# had already read before trying the lock, which can be the correction's
+# own predecessor (ISSUES.md I-283/I-292): both processes end up agreeing on
+# whatever is actually on disk once the race settles. rm just the
 # <year>.json to force an immediate refetch regardless of either marker. A
 # PAST year's cache, once written, is never revalidated or refetched.
 finmind_calendar = FinMindCalendar()
