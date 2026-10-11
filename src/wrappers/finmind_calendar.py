@@ -84,6 +84,22 @@ open its own file descriptor -- without that second check, the lock would
 only stop two fetches that are truly simultaneous, not two that are merely
 close together.
 
+ISSUES.md I-292: losing that race must not answer from the snapshot this
+call read off disk *before* it tried the lock -- by the time the winner
+releases the lock, that snapshot can already be the correction's
+predecessor. Losing the non-blocking attempt now waits for the lock with a
+bounded deadline (``LOCK_WAIT_TIMEOUT``, polled rather than a blocking
+``flock`` so it can give up on time) instead of bailing out immediately:
+getting the lock before the deadline means the winner is done, so this call
+re-reads the cache file fresh off disk (picking up whatever the winner just
+wrote) instead of trusting its own pre-lock copy. Running out the deadline
+without the lock (the winner is still fetching, or is stuck) falls back to
+a fresh disk read too, logged, rather than blocking forever or, worse,
+quietly returning the pre-lock snapshot -- it just may still be the
+pre-correction answer if the winner truly has not written yet, which is the
+best any bounded wait can do. Either way both racing callers end up reading
+the same file after the race settles, so they agree.
+
 Callers that need to keep running on an unreachable or unpublished calendar
 apply the weekday rule themselves and say so, exactly as for
 ``MarketCalendar``.
@@ -97,6 +113,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from typing import Callable, Dict, List, Optional, Union
 
 from .market_calendar import MarketCalendar
@@ -186,6 +203,15 @@ class FinMindCalendar:
     # for a same-year announcement (a makeup workday, a typhoon day off)
     # within one day, without refetching on every single call.
     CURRENT_YEAR_REVALIDATE_INTERVAL = dt.timedelta(hours=24)
+
+    # ISSUES.md I-292: how long a process that loses the revalidation lock
+    # race waits for the winner to finish before giving up and serving
+    # whatever is on disk at that point. A real wall-clock bound (not the
+    # injectable ``now``), since it is waiting on another process/thread,
+    # not deciding cache freshness. A class attribute so tests can shrink
+    # it instead of actually waiting out the production default.
+    LOCK_WAIT_TIMEOUT = dt.timedelta(seconds=2)
+    LOCK_WAIT_POLL_INTERVAL = dt.timedelta(seconds=0.02)
 
     def __init__(
         self,
@@ -435,17 +461,21 @@ class FinMindCalendar:
         processes constructing a fresh ``FinMindCalendar`` close to the same
         moment do not both see the cache as stale and both fetch.
 
-        The lock is non-blocking: a process that cannot take it immediately
-        serves the existing cached copy without touching the network, same
-        as a refetch failure already does -- never blocks, never fetches
-        anyway. The process that does take it re-checks staleness once
-        more before fetching, since the other side may have already
-        revalidated while this one was waiting to open its own file
-        descriptor; without that second check the lock would only stop two
-        *simultaneous* fetches, not two that are merely close together. A
-        lock file that cannot even be opened (e.g. an unwritable cache
-        directory) is treated the same as losing the race -- serve the
-        cache, never fetch -- logged once rather than raised.
+        Losing the lock race (ISSUES.md I-292) waits for the winner with a
+        bounded deadline (``LOCK_WAIT_TIMEOUT``) rather than bailing out
+        immediately: either way -- lock acquired before the deadline, or
+        the deadline runs out first -- this returns a fresh read of the
+        cache file (``_freshest_cached``), never the snapshot ``path`` held
+        *before* the lock was attempted, since that snapshot can already be
+        the correction's predecessor by the time the winner is done. The
+        process that does get the lock (immediately or after waiting)
+        re-checks staleness once more before fetching, since the other side
+        may have already revalidated while this one was waiting; without
+        that second check the lock would only stop two *simultaneous*
+        fetches, not two that are merely close together. A lock file that
+        cannot even be opened (e.g. an unwritable cache directory) is
+        treated the same as losing the race -- serve the freshest cache,
+        never fetch -- logged once rather than raised.
         """
         lock_path = self._revalidation_lock_path(year)
         try:
@@ -459,25 +489,59 @@ class FinMindCalendar:
                 lock_path,
                 exc,
             )
-            return None
+            return self._freshest_cached(path)
         try:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                # Another process is already revalidating this year --
-                # serve the existing cache rather than also dialing out.
-                return None
+            if not self._acquire_lock_or_wait(lock_fd):
+                # ISSUES.md I-292: the winner is still holding the lock
+                # past our bounded wait -- never block indefinitely. Serve
+                # whatever is on disk right now rather than this call's
+                # pre-lock snapshot, which the winner may already have
+                # superseded while we were waiting.
+                logger.warning(
+                    "finmind calendar %d revalidation lock still held after "
+                    "%.1fs, serving freshest on-disk copy without waiting further",
+                    year,
+                    self.LOCK_WAIT_TIMEOUT.total_seconds(),
+                )
+                return self._freshest_cached(path)
             try:
                 if not self._current_year_cache_is_stale(year, path):
-                    # The other side already finished while we waited to
-                    # open our own file descriptor; nothing left to do.
-                    cached = self._read_cached(path)
-                    return frozenset(cached) if cached is not None else None
+                    # The other side already finished -- either before we
+                    # tried the lock, or while we were waiting for it.
+                    # Either way, read the file fresh instead of trusting
+                    # this call's own pre-lock copy.
+                    return self._freshest_cached(path)
                 return self._revalidate(year, path)
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
             os.close(lock_fd)
+
+    def _acquire_lock_or_wait(self, lock_fd: int) -> bool:
+        """True once *lock_fd* is held exclusively -- immediately, or after
+        polling for up to ``LOCK_WAIT_TIMEOUT`` while another process holds
+        it (ISSUES.md I-292). False once that deadline passes without ever
+        getting it. Polls rather than a blocking ``flock`` so the wait has
+        an actual bound regardless of how long the winner takes."""
+        deadline = time.monotonic() + self.LOCK_WAIT_TIMEOUT.total_seconds()
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(self.LOCK_WAIT_POLL_INTERVAL.total_seconds(), remaining))
+
+    @staticmethod
+    def _freshest_cached(path: str) -> Optional[frozenset]:
+        """A fresh read of *path* off disk right now, as a frozenset --
+        never the caller's own snapshot from before it tried the
+        revalidation lock (ISSUES.md I-292), since that can already be
+        stale by the time the lock race settles."""
+        cached = FinMindCalendar._read_cached(path)
+        return frozenset(cached) if cached is not None else None
 
     # ------------------------------------------------------------------
     # Read surface -- same shape as MarketCalendar

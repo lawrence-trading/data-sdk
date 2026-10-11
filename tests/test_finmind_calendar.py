@@ -592,7 +592,14 @@ def test_fetch_success_with_write_failure_is_logged(cache_dir, monkeypatch, capl
 # ----------------------------------------------------------------------
 
 
-def test_a_lock_held_by_another_process_is_served_the_cache_without_fetching(cache_dir):
+def test_a_lock_held_by_another_process_is_served_the_cache_without_fetching(
+    cache_dir, monkeypatch
+):
+    # The other process never finishes within this test, so the losing
+    # side's bounded wait (ISSUES.md I-292) always runs out -- shrink it so
+    # this test does not actually sit out the production deadline.
+    monkeypatch.setattr(FinMindCalendar, "LOCK_WAIT_TIMEOUT", dt.timedelta(seconds=0.05))
+
     now = dt.datetime(2026, 6, 1, 9, 0, 0)
     first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
     assert first.is_trading_day("2026-06-01") is True
@@ -607,8 +614,9 @@ def test_a_lock_held_by_another_process_is_served_the_cache_without_fetching(cac
     try:
         fetcher, calls = _counting(lambda s, e: _frame(["2026-06-02"]))
         calendar = FinMindCalendar(fetcher, now=lambda: now)
-        # Loses the race for the lock -- serves the stale-but-only cache
-        # rather than also dialing out to FinMind.
+        # Loses the race for the lock, waits it out, and (since the other
+        # side never wrote a correction in this test) serves the
+        # stale-but-only cache rather than also dialing out to FinMind.
         assert calendar.is_trading_day("2026-06-01") is True
         assert len(calls) == 0
     finally:
@@ -651,3 +659,106 @@ def test_concurrent_constructions_against_the_same_cache_make_exactly_one_fetch(
 
     assert len(calls) == 1  # exactly one of the two instances touched the network
     assert len(results) == 2
+
+
+# ----------------------------------------------------------------------
+# ISSUES.md I-292: the side that loses the lock race must not answer from
+# the snapshot it read off disk before trying the lock -- it has to catch
+# up with whatever the winner did once the race settles.
+# ----------------------------------------------------------------------
+
+
+def test_concurrent_constructions_both_answer_the_winners_correction(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True  # the pre-correction answer
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    calls = []
+    calls_lock = threading.Lock()
+    started = threading.Barrier(2)
+
+    def slow_fetcher(start_date, end_date):
+        with calls_lock:
+            calls.append((start_date, end_date))
+        time.sleep(0.3)  # widens the window for the loser to read stale state
+        # FinMind's correction: 2026-06-01 is no longer a trading day.
+        return _frame(["2026-06-02"])
+
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        started.wait()
+        calendar = FinMindCalendar(slow_fetcher, now=lambda: now)
+        answer = calendar.is_trading_day("2026-06-01")
+        with results_lock:
+            results.append(answer)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert len(calls) == 1  # exactly one fetch
+    # Both callers -- the lock's winner and its loser alike -- must answer
+    # the corrected verdict, not whichever snapshot each happened to read
+    # off disk before trying the lock.
+    assert results == [False, False]
+    assert json.loads(path.read_text("utf-8")) == ["2026-06-02"]
+
+
+def test_a_loser_that_waits_past_the_deadline_falls_back_without_deadlocking(
+    cache_dir, monkeypatch
+):
+    # The winner's own fetch outlives the loser's bounded wait -- the
+    # loser must give up and answer rather than block forever.
+    monkeypatch.setattr(FinMindCalendar, "LOCK_WAIT_TIMEOUT", dt.timedelta(seconds=0.1))
+
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    started = threading.Barrier(2)
+    winner_done = threading.Event()
+
+    def winner_fetcher(start_date, end_date):
+        started.wait()
+        time.sleep(0.4)  # outlives the loser's 0.1s LOCK_WAIT_TIMEOUT
+        winner_done.set()
+        return _frame(["2026-06-02"])
+
+    loser_result = {}
+
+    def winner():
+        calendar = FinMindCalendar(winner_fetcher, now=lambda: now)
+        calendar.is_trading_day("2026-06-01")
+
+    def loser():
+        started.wait()
+        time.sleep(0.02)  # lets the winner take the lock first
+        calendar = FinMindCalendar(_refusing_fetcher, now=lambda: now)
+        start = time.monotonic()
+        loser_result["answer"] = calendar.is_trading_day("2026-06-01")
+        loser_result["elapsed"] = time.monotonic() - start
+
+    threads = [threading.Thread(target=winner), threading.Thread(target=loser)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not any(t.is_alive() for t in threads)  # no deadlock
+    # The loser gave up well before the winner's fetch returned, and its
+    # wait was bounded -- not an unbounded block on the winner.
+    assert loser_result["elapsed"] < 0.4
+    assert winner_done.is_set()
+    # With the winner not yet done, the loser's fallback is the freshest
+    # on-disk copy available at that moment -- still the pre-correction
+    # answer, since nothing has been written yet (ISSUES.md I-292: a
+    # timed-out wait can only serve what is actually on disk).
+    assert loser_result["answer"] is True
