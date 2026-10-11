@@ -236,8 +236,13 @@ calendar.export_range("2026-09-25", "2026-09-29")  # [{"date", "trading_day", "c
 # alive across days only ever revalidates once, on that first call --
 # ISSUES.md I-268) so a same-year FinMind correction (a makeup workday, a
 # typhoon day off) is picked up within a day; a failed revalidation keeps
-# serving the existing cache and logs why. A PAST year's cache, once
-# written, is never revalidated or refetched.
+# serving the existing cache and logs why. Either outcome -- success or
+# failure -- records the attempt's time in a sibling <year>.json.revalidated_at
+# marker (also under this cache directory, written atomically), so a FinMind
+# outage backs off for the same 24h instead of every freshly constructed
+# FinMindCalendar dialing out again while it lasts (ISSUES.md I-274); rm just
+# the <year>.json to force an immediate refetch regardless of that marker. A
+# PAST year's cache, once written, is never revalidated or refetched.
 finmind_calendar = FinMindCalendar()
 finmind_calendar.is_trading_day("2026-09-25")      # False, decided by FinMind alone
 finmind_calendar.closure("2026-09-25")             # "中秋節" (borrowed from MarketCalendar)
