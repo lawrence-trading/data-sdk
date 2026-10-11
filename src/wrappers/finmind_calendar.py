@@ -59,6 +59,17 @@ file's mtime or the marker is more recent. A missing or unparsable marker
 reads as "no attempt yet" and falls back to the cache file's mtime alone,
 exactly as before I-274.
 
+ISSUES.md I-280: the marker above must not suppress a retry that still
+needs to happen. "A revalidation attempt was made" only means something
+once it is either a *failure* (nothing to lose -- nothing new was fetched)
+or a *persisted success* (the fetch succeeded AND ``_write_cache`` actually
+wrote it). A fetch that succeeds but whose cache write fails is neither: a
+correction was fetched (the fetching instance's own in-memory answer is
+already correct) but never reached disk, so the marker is left untouched
+-- the next freshly constructed instance still sees the old cache file's
+mtime alone and retries, instead of serving the stale answer for a full
+``CURRENT_YEAR_REVALIDATE_INTERVAL`` because of an attempt nothing came of.
+
 Callers that need to keep running on an unreachable or unpublished calendar
 apply the weekday rule themselves and say so, exactly as for
 ``MarketCalendar``.
@@ -322,11 +333,17 @@ class FinMindCalendar:
         frame = self._fetcher()(f"{year}-01-01", f"{year}-12-31")
         return sorted(set(_dates_from_frame(frame)))
 
-    def _write_cache(self, year: int, dates_list: List[str], path: str) -> None:
+    def _write_cache(self, year: int, dates_list: List[str], path: str) -> bool:
+        """Persists *dates_list* for *year*; ``True`` once it is actually on
+        disk, ``False`` on a write failure (logged, never fatal). ISSUES.md
+        I-280: callers that gate a "verified" marker on persistence, not
+        merely on having fetched, need this to tell the two apart."""
         try:
             self._write_atomic(json.dumps(dates_list, ensure_ascii=False).encode("utf-8"), path)
+            return True
         except OSError as exc:
             logger.warning("finmind calendar %d not cached at %s: %s", year, path, exc)
+            return False
 
     def _current_year_cache_is_stale(self, year: int, path: str) -> bool:
         """True once ``CURRENT_YEAR_REVALIDATE_INTERVAL`` has passed since
@@ -350,24 +367,45 @@ class FinMindCalendar:
 
     def _revalidate(self, year: int, path: str) -> Optional[frozenset]:
         """Refetches the current year for ISSUES.md I-268; ``None`` (keep the
-        existing cache) on any failure, logged either way. ISSUES.md
-        I-274: records this attempt's time BEFORE fetching, so even a
-        fetch that raises still counts as an attempt the next staleness
-        check (``_current_year_cache_is_stale``) can see."""
-        self._record_revalidation_attempt(year, self._now())
+        existing cache) on any failure, logged either way.
+
+        ISSUES.md I-274/I-280: the revalidation-attempt marker is recorded
+        only once this attempt is something the next staleness check may
+        safely treat as "settled" -- a fetch that raises, or one that comes
+        back with no rows, counts immediately (there is nothing new to
+        lose by waiting another interval). A fetch that succeeds is only
+        "settled" once ``_write_cache`` actually persists it; if the write
+        fails, the marker is left untouched on purpose, so the next freshly
+        constructed instance still sees the old cache file's mtime alone
+        and retries, rather than serving the stale answer for a full
+        ``CURRENT_YEAR_REVALIDATE_INTERVAL`` because of an attempt that
+        never reached disk. Either way this call returns the freshly
+        fetched dates to its own caller -- a write failure only costs the
+        *next* instance a retry, never this instance's own in-memory
+        answer.
+        """
         try:
             dates_list = self._fetch_year(year)
         except Exception as exc:  # noqa: BLE001 -- keep the cached copy on ANY failure
             logger.warning(
                 "finmind calendar %d revalidation failed, keeping cached copy: %s", year, exc
             )
+            self._record_revalidation_attempt(year, self._now())
             return None
         if not dates_list:
             logger.warning(
                 "finmind calendar %d revalidation returned no rows, keeping cached copy", year
             )
+            self._record_revalidation_attempt(year, self._now())
             return None
-        self._write_cache(year, dates_list, path)
+        if self._write_cache(year, dates_list, path):
+            self._record_revalidation_attempt(year, self._now())
+        else:
+            logger.warning(
+                "finmind calendar %d revalidation fetched but not cached, "
+                "next call will retry instead of waiting out the interval",
+                year,
+            )
         return frozenset(dates_list)
 
     # ------------------------------------------------------------------

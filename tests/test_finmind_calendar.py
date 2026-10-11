@@ -60,6 +60,25 @@ def _agreeing_fetcher(start_date, end_date):
     return _frame(_agreeing_year_dates(year, _twse_2026()))
 
 
+def _write_atomic_failing_for_the_cache_file_only():
+    """A replacement for ``FinMindCalendar._write_atomic`` that raises
+    ``OSError`` only for the year's own cache file, while letting a sibling
+    ``.revalidated_at`` marker write through to the real implementation --
+    isolates "the fetch succeeded but persisting it failed" (ISSUES.md
+    I-280) from "the attempt marker itself failed to write" (already
+    covered by ``test_an_unwritable_cache_still_serves_the_fetched_year``
+    and friends), which a single always-fail patch cannot distinguish
+    since both go through the same low-level atomic writer."""
+    real_write_atomic = FinMindCalendar._write_atomic
+
+    def selective(payload, path):
+        if str(path).endswith(".revalidated_at"):
+            return real_write_atomic(payload, path)
+        raise OSError("disk full")
+
+    return staticmethod(selective)
+
+
 def _counting(fetcher):
     calls = []
 
@@ -479,3 +498,85 @@ def test_a_garbled_attempt_marker_is_treated_as_no_attempt_yet(cache_dir):
     fetcher, calls = _counting(lambda s, e: _frame(["2026-06-01"]))
     FinMindCalendar(fetcher, now=lambda: now).is_trading_day("2026-06-01")
     assert len(calls) == 1  # the garbled marker did not suppress the attempt
+
+
+# ----------------------------------------------------------------------
+# ISSUES.md I-280: a fetch that succeeds but whose cache write fails must
+# not let the I-274 marker suppress the next instance's retry.
+# ----------------------------------------------------------------------
+
+
+def test_fetch_success_with_write_failure_lets_the_next_instance_retry(cache_dir, monkeypatch):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    # The fetch itself succeeds with FinMind's correction (2026-06-01 is no
+    # longer a trading day), but persisting the cache file fails (e.g. a
+    # full disk, a permissions race); the marker write is left real.
+    # Scoped to its own context so undoing it does not also undo the
+    # cache_dir fixture's own env var patch (sharing the outer
+    # `monkeypatch` for that would redirect the second instance below at
+    # the user's real cache directory instead of this test's tmp_path).
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            FinMindCalendar, "_write_atomic", _write_atomic_failing_for_the_cache_file_only()
+        )
+        # FinMind's correction: 2026-06-01 is dropped, 2026-06-02 is now
+        # listed instead -- a non-empty, successful fetch (not "no rows").
+        corrected_fetcher, first_calls = _counting(lambda s, e: _frame(["2026-06-02"]))
+        revalidating = FinMindCalendar(corrected_fetcher, now=lambda: now)
+        # The fetching instance's own in-memory answer is still correct
+        # even though persistence failed.
+        assert revalidating.is_trading_day("2026-06-01") is False
+        assert len(first_calls) == 1
+        # Nothing reached disk -- the stale cache file is untouched.
+        assert json.loads(path.read_text("utf-8")) == ["2026-06-01"]
+
+    # A second, freshly constructed instance a minute later (real
+    # _write_atomic restored, still this test's tmp_path cache_dir) must
+    # still see the cache as needing a retry -- not suppressed by a marker
+    # that a fetch was "attempted" -- since the write never persisted.
+    fetcher, second_calls = _counting(lambda s, e: _frame(["2026-06-02"]))
+    second = FinMindCalendar(fetcher, now=lambda: now)
+    assert second.is_trading_day("2026-06-01") is False
+    assert len(second_calls) == 1  # retried the network instead of serving the stale cache
+    assert json.loads(path.read_text("utf-8")) == ["2026-06-02"]  # this time it persisted
+
+
+def test_fetch_success_with_write_failure_does_not_write_the_attempt_marker(
+    cache_dir, monkeypatch
+):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    monkeypatch.setattr(
+        FinMindCalendar, "_write_atomic", _write_atomic_failing_for_the_cache_file_only()
+    )
+    FinMindCalendar(lambda s, e: _frame(["2026-06-02"]), now=lambda: now).is_trading_day(
+        "2026-06-01"
+    )
+    assert not (cache_dir / "2026.json.revalidated_at").exists()
+
+
+def test_fetch_success_with_write_failure_is_logged(cache_dir, monkeypatch, caplog):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    monkeypatch.setattr(
+        FinMindCalendar, "_write_atomic", _write_atomic_failing_for_the_cache_file_only()
+    )
+    with caplog.at_level("WARNING"):
+        FinMindCalendar(lambda s, e: _frame(["2026-06-02"]), now=lambda: now).is_trading_day(
+            "2026-06-01"
+        )
+    assert "not cached" in caplog.text
+    assert "next call will retry" in caplog.text
