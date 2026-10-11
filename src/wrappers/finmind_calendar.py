@@ -70,6 +70,20 @@ already correct) but never reached disk, so the marker is left untouched
 mtime alone and retries, instead of serving the stale answer for a full
 ``CURRENT_YEAR_REVALIDATE_INTERVAL`` because of an attempt nothing came of.
 
+ISSUES.md I-283: the stale-check, the marker write and the fetch are one
+unit that must happen at most once per interval even when two processes
+(the deploy script and the pre-open job, say) construct a ``FinMindCalendar``
+at close to the same moment against the same cache directory. An advisory
+lock (``fcntl.flock`` on a sibling ``<year>.json.lock`` file) serialises
+that unit: a process that cannot take the lock immediately serves the
+existing cached copy without fetching, exactly like a refetch failure
+already does, rather than blocking or dialing out anyway. The process that
+does take the lock re-checks staleness once more before fetching, since
+the other side may have already revalidated while this one was waiting to
+open its own file descriptor -- without that second check, the lock would
+only stop two fetches that are truly simultaneous, not two that are merely
+close together.
+
 Callers that need to keep running on an unreachable or unpublished calendar
 apply the weekday rule themselves and say so, exactly as for
 ``MarketCalendar``.
@@ -78,6 +92,7 @@ apply the weekday rule themselves and say so, exactly as for
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import logging
 import os
@@ -224,6 +239,13 @@ class FinMindCalendar:
         return cls.cache_path(year) + ".revalidated_at"
 
     @classmethod
+    def _revalidation_lock_path(cls, year: int) -> str:
+        """ISSUES.md I-283: the sibling advisory-lock file guarding *year*'s
+        stale-check, marker-write and fetch as one unit across processes
+        sharing this cache directory."""
+        return cls.cache_path(year) + ".lock"
+
+    @classmethod
     def _record_revalidation_attempt(cls, year: int, when: dt.datetime) -> None:
         """Marks *when* as the latest revalidation attempt for *year* --
         called on every attempt, success or failure, so a failed attempt
@@ -314,7 +336,7 @@ class FinMindCalendar:
         cached = self._read_cached(path)
         if cached is not None:
             if year == self._now().year and self._current_year_cache_is_stale(year, path):
-                refetched = self._revalidate(year, path)
+                refetched = self._revalidate_once_per_interval(year, path)
                 if refetched is not None:
                     self._year_cache[year] = refetched
                     return refetched
@@ -407,6 +429,55 @@ class FinMindCalendar:
                 year,
             )
         return frozenset(dates_list)
+
+    def _revalidate_once_per_interval(self, year: int, path: str) -> Optional[frozenset]:
+        """Wraps ``_revalidate`` in an advisory lock (ISSUES.md I-283) so two
+        processes constructing a fresh ``FinMindCalendar`` close to the same
+        moment do not both see the cache as stale and both fetch.
+
+        The lock is non-blocking: a process that cannot take it immediately
+        serves the existing cached copy without touching the network, same
+        as a refetch failure already does -- never blocks, never fetches
+        anyway. The process that does take it re-checks staleness once
+        more before fetching, since the other side may have already
+        revalidated while this one was waiting to open its own file
+        descriptor; without that second check the lock would only stop two
+        *simultaneous* fetches, not two that are merely close together. A
+        lock file that cannot even be opened (e.g. an unwritable cache
+        directory) is treated the same as losing the race -- serve the
+        cache, never fetch -- logged once rather than raised.
+        """
+        lock_path = self._revalidation_lock_path(year)
+        try:
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError as exc:
+            logger.warning(
+                "finmind calendar %d revalidation lock unavailable at %s, "
+                "serving cached copy without fetching: %s",
+                year,
+                lock_path,
+                exc,
+            )
+            return None
+        try:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # Another process is already revalidating this year --
+                # serve the existing cache rather than also dialing out.
+                return None
+            try:
+                if not self._current_year_cache_is_stale(year, path):
+                    # The other side already finished while we waited to
+                    # open our own file descriptor; nothing left to do.
+                    cached = self._read_cached(path)
+                    return frozenset(cached) if cached is not None else None
+                return self._revalidate(year, path)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
     # ------------------------------------------------------------------
     # Read surface -- same shape as MarketCalendar

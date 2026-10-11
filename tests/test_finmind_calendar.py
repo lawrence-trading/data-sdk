@@ -9,8 +9,11 @@ deciding a day TWSE calls open, and TWSE's label being unavailable.
 """
 
 import datetime as dt
+import fcntl
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -580,3 +583,71 @@ def test_fetch_success_with_write_failure_is_logged(cache_dir, monkeypatch, capl
         )
     assert "not cached" in caplog.text
     assert "next call will retry" in caplog.text
+
+
+# ----------------------------------------------------------------------
+# ISSUES.md I-283: the stale-check, marker-write and fetch are serialised
+# with an advisory lock across processes/threads sharing one cache
+# directory, keeping the at-most-one-attempt-per-interval guarantee.
+# ----------------------------------------------------------------------
+
+
+def test_a_lock_held_by_another_process_is_served_the_cache_without_fetching(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    # Simulate another process already revalidating this year: hold the
+    # lock file externally before constructing this instance.
+    lock_path = cache_dir / "2026.json.lock"
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        fetcher, calls = _counting(lambda s, e: _frame(["2026-06-02"]))
+        calendar = FinMindCalendar(fetcher, now=lambda: now)
+        # Loses the race for the lock -- serves the stale-but-only cache
+        # rather than also dialing out to FinMind.
+        assert calendar.is_trading_day("2026-06-01") is True
+        assert len(calls) == 0
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def test_concurrent_constructions_against_the_same_cache_make_exactly_one_fetch(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    calls = []
+    calls_lock = threading.Lock()
+    started = threading.Barrier(2)
+
+    def slow_fetcher(start_date, end_date):
+        with calls_lock:
+            calls.append((start_date, end_date))
+        time.sleep(0.3)  # widens the window for the other thread to lose the lock race
+        return _frame(["2026-06-02"])
+
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        started.wait()
+        calendar = FinMindCalendar(slow_fetcher, now=lambda: now)
+        answer = calendar.is_trading_day("2026-06-01")
+        with results_lock:
+            results.append(answer)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert len(calls) == 1  # exactly one of the two instances touched the network
+    assert len(results) == 2
