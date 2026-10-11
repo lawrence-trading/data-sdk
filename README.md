@@ -246,9 +246,13 @@ calendar.export_range("2026-09-25", "2026-09-29")  # [{"date", "trading_day", "c
 # succeeds but whose cache write fails (full disk, a permissions race)
 # leaves the marker untouched, so the next freshly constructed instance
 # still retries instead of serving the stale cache for the rest of the 24h
-# (ISSUES.md I-280). rm just the <year>.json to force an immediate refetch
-# regardless of that marker. A PAST year's cache, once written, is never
-# revalidated or refetched.
+# (ISSUES.md I-280). Two processes constructing a FinMindCalendar close to
+# the same moment (the deploy script and the pre-open job, say) share an
+# advisory lock on a sibling <year>.json.lock file (fcntl.flock,
+# non-blocking) so only one of them actually revalidates -- the other
+# serves the existing cache without fetching (ISSUES.md I-283). rm just the
+# <year>.json to force an immediate refetch regardless of either marker. A
+# PAST year's cache, once written, is never revalidated or refetched.
 finmind_calendar = FinMindCalendar()
 finmind_calendar.is_trading_day("2026-09-25")      # False, decided by FinMind alone
 finmind_calendar.closure("2026-09-25")             # "中秋節" (borrowed from MarketCalendar)
