@@ -388,3 +388,94 @@ def test_revalidation_with_no_rows_keeps_the_cached_copy_and_says_so(cache_dir, 
 def test_now_defaults_to_the_real_clock(cache_dir):
     calendar = FinMindCalendar(_refusing_fetcher)
     assert abs((calendar._now() - dt.datetime.now()).total_seconds()) < 5
+
+
+# ----------------------------------------------------------------------
+# ISSUES.md I-274: a failed revalidation backs off for the same interval
+# as a successful one, across fresh instances (and processes, since the
+# marker is a file) sharing the same cache directory.
+# ----------------------------------------------------------------------
+
+
+def test_fresh_instances_after_a_failed_attempt_make_exactly_one_network_call(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)  # older than CURRENT_YEAR_REVALIDATE_INTERVAL
+
+    def _unreachable(start_date, end_date):
+        raise RuntimeError("network down")
+
+    fetcher, calls = _counting(_unreachable)
+    for _ in range(5):
+        calendar = FinMindCalendar(fetcher, now=lambda: now)
+        assert calendar.is_trading_day("2026-06-01") is True  # the stale-but-only copy
+    assert len(calls) == 1  # only the first instance's attempt actually touched the network
+
+
+def test_a_new_attempt_is_made_once_the_interval_has_passed_again(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    def _unreachable(start_date, end_date):
+        raise RuntimeError("network down")
+
+    fetcher, calls = _counting(_unreachable)
+    FinMindCalendar(fetcher, now=lambda: now).is_trading_day("2026-06-01")
+    assert len(calls) == 1  # the one attempt this interval allows
+
+    later = now + FinMindCalendar.CURRENT_YEAR_REVALIDATE_INTERVAL
+    FinMindCalendar(fetcher, now=lambda: later).is_trading_day("2026-06-01")
+    assert len(calls) == 2  # a full interval has passed since the failed attempt
+
+
+def test_a_success_after_an_outage_still_refreshes_the_cache(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    def _unreachable(start_date, end_date):
+        raise RuntimeError("network down")
+
+    FinMindCalendar(_unreachable, now=lambda: now).is_trading_day("2026-06-01")  # the outage
+
+    later = now + FinMindCalendar.CURRENT_YEAR_REVALIDATE_INTERVAL
+    recovered = FinMindCalendar(lambda s, e: _frame(["2026-06-02"]), now=lambda: later)
+    assert recovered.is_trading_day("2026-06-01") is False
+    assert recovered.is_trading_day("2026-06-02") is True
+    assert json.loads(path.read_text("utf-8")) == ["2026-06-02"]
+
+
+def test_revalidation_attempt_marker_is_written_next_to_the_cache_file(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+
+    def _unreachable(start_date, end_date):
+        raise RuntimeError("network down")
+
+    FinMindCalendar(_unreachable, now=lambda: now).is_trading_day("2026-06-01")
+    marker = cache_dir / "2026.json.revalidated_at"
+    assert marker.is_file()
+    assert float(marker.read_text("ascii")) == now.timestamp()
+
+
+def test_a_garbled_attempt_marker_is_treated_as_no_attempt_yet(cache_dir):
+    now = dt.datetime(2026, 6, 1, 9, 0, 0)
+    first = FinMindCalendar(lambda s, e: _frame(["2026-06-01"]), now=lambda: now)
+    assert first.is_trading_day("2026-06-01") is True
+    path = cache_dir / "2026.json"
+    _backdate(path, now, hours_ago=25)
+    (cache_dir / "2026.json.revalidated_at").write_text("not-a-timestamp", encoding="ascii")
+
+    fetcher, calls = _counting(lambda s, e: _frame(["2026-06-01"]))
+    FinMindCalendar(fetcher, now=lambda: now).is_trading_day("2026-06-01")
+    assert len(calls) == 1  # the garbled marker did not suppress the attempt

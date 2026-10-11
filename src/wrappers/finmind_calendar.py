@@ -46,6 +46,19 @@ logs why; it never raises and never discards a cache that is still the best
 information available. Only the current year's own cache file's mtime is
 touched this way -- a past year is cached forever, exactly as before.
 
+ISSUES.md I-274: a *failed* revalidation attempt (unreachable network, or an
+empty response) is recorded too, not just a successful one -- otherwise
+every freshly constructed ``FinMindCalendar`` during a FinMind outage sees
+the same stale cache file and dials out again, so a multi-process pre-open
+run or a string of deploys each cost their own attempt instead of at most
+one per ``CURRENT_YEAR_REVALIDATE_INTERVAL``. The attempt time (success or
+failure alike) is written to a sibling marker file next to the year's own
+cache (``<year>.json.revalidated_at``), atomically, and the staleness check
+treats the cache as fresh until that long after whichever of the cache
+file's mtime or the marker is more recent. A missing or unparsable marker
+reads as "no attempt yet" and falls back to the cache file's mtime alone,
+exactly as before I-274.
+
 Callers that need to keep running on an unreachable or unpublished calendar
 apply the weekday rule themselves and say so, exactly as for
 ``MarketCalendar``.
@@ -192,6 +205,44 @@ class FinMindCalendar:
     def cache_path(cls, year: int) -> str:
         return os.path.join(cls.cache_dir(), f"{year}.json")
 
+    @classmethod
+    def _revalidation_attempt_path(cls, year: int) -> str:
+        """ISSUES.md I-274: the sibling marker that records *year*'s last
+        revalidation attempt, success or failure, next to its own cache
+        file."""
+        return cls.cache_path(year) + ".revalidated_at"
+
+    @classmethod
+    def _record_revalidation_attempt(cls, year: int, when: dt.datetime) -> None:
+        """Marks *when* as the latest revalidation attempt for *year* --
+        called on every attempt, success or failure, so a failed attempt
+        backs off the next one exactly like a successful attempt does
+        (ISSUES.md I-274). Written atomically; a write failure is logged
+        and skipped, never fatal, same contract as ``_write_cache``."""
+        path = cls._revalidation_attempt_path(year)
+        try:
+            cls._write_atomic(str(when.timestamp()).encode("ascii"), path)
+        except OSError as exc:
+            logger.warning(
+                "finmind calendar %d revalidation-attempt marker not written at %s: %s",
+                year,
+                path,
+                exc,
+            )
+
+    @classmethod
+    def _last_revalidation_attempt(cls, year: int) -> Optional[float]:
+        """Epoch seconds of the last revalidation attempt recorded for
+        *year*, or ``None`` when there has never been one -- a missing
+        file, an unreadable one, or content that is not a plain float all
+        read as "no attempt yet" rather than raising (ISSUES.md I-274)."""
+        path = cls._revalidation_attempt_path(year)
+        try:
+            with open(path, "r", encoding="ascii") as fh:
+                return float(fh.read().strip())
+        except (OSError, ValueError):
+            return None
+
     @staticmethod
     def _write_atomic(payload: bytes, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -251,7 +302,7 @@ class FinMindCalendar:
         path = self.cache_path(year)
         cached = self._read_cached(path)
         if cached is not None:
-            if year == self._now().year and self._current_year_cache_is_stale(path):
+            if year == self._now().year and self._current_year_cache_is_stale(year, path):
                 refetched = self._revalidate(year, path)
                 if refetched is not None:
                     self._year_cache[year] = refetched
@@ -277,16 +328,33 @@ class FinMindCalendar:
         except OSError as exc:
             logger.warning("finmind calendar %d not cached at %s: %s", year, path, exc)
 
-    def _current_year_cache_is_stale(self, path: str) -> bool:
+    def _current_year_cache_is_stale(self, year: int, path: str) -> bool:
+        """True once ``CURRENT_YEAR_REVALIDATE_INTERVAL`` has passed since
+        whichever is more recent: the cache file's own mtime, or the last
+        revalidation attempt recorded for *year* -- success or failure
+        alike (``_last_revalidation_attempt``, ISSUES.md I-274). A failed
+        attempt therefore backs off the next one for the same interval a
+        successful attempt would, instead of every freshly constructed
+        instance retrying the network while the outage lasts. A missing or
+        garbled marker (``None``) falls back to the cache file's mtime
+        alone, exactly as before I-274."""
         try:
-            age = self._now().timestamp() - os.path.getmtime(path)
+            reference = os.path.getmtime(path)
         except OSError:
             return True
+        attempted_at = self._last_revalidation_attempt(year)
+        if attempted_at is not None and attempted_at > reference:
+            reference = attempted_at
+        age = self._now().timestamp() - reference
         return age >= self.CURRENT_YEAR_REVALIDATE_INTERVAL.total_seconds()
 
     def _revalidate(self, year: int, path: str) -> Optional[frozenset]:
         """Refetches the current year for ISSUES.md I-268; ``None`` (keep the
-        existing cache) on any failure, logged either way."""
+        existing cache) on any failure, logged either way. ISSUES.md
+        I-274: records this attempt's time BEFORE fetching, so even a
+        fetch that raises still counts as an attempt the next staleness
+        check (``_current_year_cache_is_stale``) can see."""
+        self._record_revalidation_attempt(year, self._now())
         try:
             dates_list = self._fetch_year(year)
         except Exception as exc:  # noqa: BLE001 -- keep the cached copy on ANY failure
