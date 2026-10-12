@@ -201,6 +201,17 @@ ref.loc["2330", ["margin_balance", "short_balance", "lending_balance", "day_trad
 # categories -- that mapping is the CB page's own job.
 announcements = FinLabWrapper().get_material_announcements(stock_ids=["9958"])
 
+# 除權息預告表 (dividend_announcement, taiwan_dashboard's TX page's own
+# evaporation forecast). Dataset id confirmed against an already-fetched
+# local copy (~/finlab_db/dividend_announcement.feather), not a live call.
+# One row per announced event: ex_rights_date (除權, stock dividend) and
+# ex_dividend_date (除息, cash dividend) can each be NaT alone;
+# cash/stock_dividend_per_share are the per-row pair of funding-source
+# columns summed. `since` keeps only rows whose either date is on or after
+# it. No per-day cache -- re-fetches the dataset every call, same posture
+# as get_material_announcements above.
+dividends = FinLabWrapper().get_dividend_announcements(since="2026-10-12")
+
 # TAIFEX public endpoints, cached under the day each payload carries. Prices
 # come back as the published strings; prod_id is derived for the i024 join.
 taifex = TaifexWrapper()
