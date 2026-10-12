@@ -47,6 +47,23 @@ import pandas as pd
 #     (CbInfoWrapper.get_cb_underlying_map) before reading this table.
 MATERIAL_ANNOUNCEMENT_DATASET = "important_info_announcement"
 
+# 除權息預告表 (ISSUES.md I-317, confirmed 2026-10-12 against an already-
+# fetched local copy, ~/finlab_db/dividend_announcement.feather, 29,338
+# rows): FinLab's own catalog id for this is "dividend_announcement", not
+# the "dividend_tse"/"dividend_otc" tables (those are keyed by past EX-DATE
+# with the exchange's own post-facto reference/limit prices, not a forward-
+# looking announcement). One row per distribution event, columns confirmed
+# from that local copy: stock_id, 公告日期, 公司名稱, 股利所屬期間,
+# 權利分派基準日, 盈餘轉增資配股(元/股), 法定盈餘公積、資本公積轉增資配股
+# (元/股), 除權交易日, 盈餘分配之股東現金股利(元/股), 法定盈餘公積、資本
+# 公積發放之現金(元/股), 除息交易日, 現金股利發放日, 現金增資總股數(股),
+# 現金增資認股比率(%), 現金增資認購價(元/股), 參加分派總股數, 公告時間,
+# 普通股每股面額, 市場別, key_date. A combined 除權息 event carries both an
+# 除權交易日 and an 除息交易日; either can be NaT alone (verified: 1727 中華化
+# has only 除權交易日 with zero cash, several rows below have only 除息交易日
+# with zero stock).
+DIVIDEND_ANNOUNCEMENT_DATASET = "dividend_announcement"
+
 TAIPEI = dt.timezone(dt.timedelta(hours=8))
 
 DATASETS = {
@@ -272,3 +289,59 @@ class FinLabWrapper:
         if since is not None:
             frame = frame[frame["announce_date"] >= pd.Timestamp(since)]
         return frame[["stock_id", "announce_date", "category_raw"]].reset_index(drop=True)
+
+    def get_dividend_announcements(self, *, since=None) -> pd.DataFrame:
+        """除權息預告表 (``dividend_announcement`` dataset -- see the module-
+        level comment above ``DIVIDEND_ANNOUNCEMENT_DATASET`` for how that
+        id was confirmed). Returns, one row per announced distribution
+        event:
+
+            stock_id                   the issuer's own 4-digit equity code
+            company_name                FinLab's own 公司名稱
+            ex_rights_date              除權交易日 (stock dividend), NaT if none
+            ex_dividend_date            除息交易日 (cash dividend), NaT if none
+            cash_dividend_per_share     元/股, real cash paid per share --
+                                         盈餘分配之股東現金股利 plus 法定盈餘
+                                         公積、資本公積發放之現金 (both are
+                                         cash, just different funding
+                                         sources on the books), 0 when absent
+            stock_dividend_per_share    元/股, the equivalent pair of
+                                         stock-dividend columns summed the
+                                         same way, 0 when absent
+
+        This method does NOT decide which of those two evaporates a market-
+        cap-weighted index (a stock dividend is base-value-adjusted, not a
+        real outflow) -- that rule belongs to the consumer (docs/pages/
+        tx.md), not the SDK.
+
+        ``since`` (optional, a date or ``"YYYY-MM-DD"``): keep only rows
+        whose ``ex_rights_date`` or ``ex_dividend_date`` falls on or after
+        it -- the caller decides what "upcoming" means. Defaults to no
+        filtering (the whole announced history).
+
+        Every call re-fetches the dataset through ``_fetch_dataset`` (no
+        per-day cache, the same choice ``get_material_announcements`` makes
+        and for the same reason: this is an accumulating announcement log,
+        not a daily snapshot table)."""
+        raw = self._fetch_dataset(DIVIDEND_ANNOUNCEMENT_DATASET)
+        frame = pd.DataFrame(raw).copy()
+        cash = (
+            pd.to_numeric(frame["盈餘分配之股東現金股利(元/股)"], errors="coerce").fillna(0)
+            + pd.to_numeric(frame["法定盈餘公積、資本公積發放之現金(元/股)"], errors="coerce").fillna(0)
+        )
+        stock = (
+            pd.to_numeric(frame["盈餘轉增資配股(元/股)"], errors="coerce").fillna(0)
+            + pd.to_numeric(frame["法定盈餘公積、資本公積轉增資配股(元/股)"], errors="coerce").fillna(0)
+        )
+        out = pd.DataFrame({
+            "stock_id": frame["stock_id"].astype(str),
+            "company_name": frame["公司名稱"].astype(str),
+            "ex_rights_date": pd.to_datetime(frame["除權交易日"]),
+            "ex_dividend_date": pd.to_datetime(frame["除息交易日"]),
+            "cash_dividend_per_share": cash,
+            "stock_dividend_per_share": stock,
+        })
+        if since is not None:
+            since_ts = pd.Timestamp(since)
+            out = out[(out["ex_rights_date"] >= since_ts) | (out["ex_dividend_date"] >= since_ts)]
+        return out.reset_index(drop=True)

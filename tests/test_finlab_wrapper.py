@@ -10,6 +10,7 @@ import pytest
 from data_sdk import FinLabAlignmentError, FinLabWrapper
 from data_sdk.wrappers.finlab_wrapper import (
     DATASETS,
+    DIVIDEND_ANNOUNCEMENT_DATASET,
     MATERIAL_ANNOUNCEMENT_DATASET,
     align_latest_rows,
     latest_before_today,
@@ -187,3 +188,67 @@ def test_material_announcements_shape_and_filters():
     assert len(recent) == 1
     assert recent.iloc[0]["category_raw"] == "公告本公司除息基準日暨轉換公司債停止轉換期間"
     assert recent.iloc[0]["announce_date"] == pd.Timestamp("2026-06-25")
+
+
+def _dividend_rows():
+    # Column names and NaT patterns match an already-fetched local copy
+    # (~/finlab_db/dividend_announcement.feather) exactly: 2330 a plain cash
+    # dividend (no stock leg), 2317 a combined 除權息 event (both legs, two
+    # funding sources each), 1101 a stock-only 除權 event (zero cash).
+    return pd.DataFrame(
+        [
+            {"stock_id": "2330", "公司名稱": "台積電", "除權交易日": pd.NaT, "除息交易日": "2026-10-20",
+             "盈餘分配之股東現金股利(元/股)": 3.0, "法定盈餘公積、資本公積發放之現金(元/股)": 0.0,
+             "盈餘轉增資配股(元/股)": 0.0, "法定盈餘公積、資本公積轉增資配股(元/股)": 0.0},
+            {"stock_id": "2317", "公司名稱": "鴻海", "除權交易日": "2026-10-21", "除息交易日": "2026-10-21",
+             "盈餘分配之股東現金股利(元/股)": 2.0, "法定盈餘公積、資本公積發放之現金(元/股)": 0.5,
+             "盈餘轉增資配股(元/股)": 0.1, "法定盈餘公積、資本公積轉增資配股(元/股)": 0.0},
+            {"stock_id": "1101", "公司名稱": "台泥", "除權交易日": "2026-09-01", "除息交易日": pd.NaT,
+             "盈餘分配之股東現金股利(元/股)": 0.0, "法定盈餘公積、資本公積發放之現金(元/股)": 0.0,
+             "盈餘轉增資配股(元/股)": 0.15, "法定盈餘公積、資本公積轉增資配股(元/股)": 0.0},
+        ]
+    )
+
+
+def test_dividend_announcements_calls_the_confirmed_dataset_id():
+    seen = {}
+
+    def fetch(dataset):
+        seen["dataset"] = dataset
+        return _dividend_rows()
+
+    FinLabWrapper(fetch=fetch).get_dividend_announcements()
+    assert seen["dataset"] == DIVIDEND_ANNOUNCEMENT_DATASET == "dividend_announcement"
+
+
+def test_dividend_announcements_shape_and_sums():
+    wrapper = FinLabWrapper(fetch=lambda dataset: _dividend_rows())
+    out = wrapper.get_dividend_announcements()
+
+    assert list(out.columns) == [
+        "stock_id", "company_name", "ex_rights_date", "ex_dividend_date",
+        "cash_dividend_per_share", "stock_dividend_per_share",
+    ]
+    assert len(out) == 3
+
+    tsmc = out[out["stock_id"] == "2330"].iloc[0]
+    assert pd.isna(tsmc["ex_rights_date"])
+    assert tsmc["ex_dividend_date"] == pd.Timestamp("2026-10-20")
+    assert tsmc["cash_dividend_per_share"] == 3.0
+    assert tsmc["stock_dividend_per_share"] == 0.0
+
+    foxconn = out[out["stock_id"] == "2317"].iloc[0]
+    assert foxconn["cash_dividend_per_share"] == 2.5  # two cash columns summed
+    assert foxconn["stock_dividend_per_share"] == 0.1
+
+    tcc = out[out["stock_id"] == "1101"].iloc[0]
+    assert pd.isna(tcc["ex_dividend_date"])
+    assert tcc["cash_dividend_per_share"] == 0.0
+    assert tcc["stock_dividend_per_share"] == 0.15
+
+
+def test_dividend_announcements_since_filters_on_either_date():
+    wrapper = FinLabWrapper(fetch=lambda dataset: _dividend_rows())
+
+    upcoming = wrapper.get_dividend_announcements(since="2026-10-01")
+    assert set(upcoming["stock_id"]) == {"2330", "2317"}  # 1101's 2026-09-01 excluded
