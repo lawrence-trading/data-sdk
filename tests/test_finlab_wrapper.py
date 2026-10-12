@@ -197,13 +197,13 @@ def _dividend_rows():
     # funding sources each), 1101 a stock-only 除權 event (zero cash).
     return pd.DataFrame(
         [
-            {"stock_id": "2330", "公司名稱": "台積電", "除權交易日": pd.NaT, "除息交易日": "2026-10-20",
+            {"stock_id": "2330", "公告日期": "2026-08-12", "公司名稱": "台積電", "除權交易日": pd.NaT, "除息交易日": "2026-10-20",
              "盈餘分配之股東現金股利(元/股)": 3.0, "法定盈餘公積、資本公積發放之現金(元/股)": 0.0,
              "盈餘轉增資配股(元/股)": 0.0, "法定盈餘公積、資本公積轉增資配股(元/股)": 0.0},
-            {"stock_id": "2317", "公司名稱": "鴻海", "除權交易日": "2026-10-21", "除息交易日": "2026-10-21",
+            {"stock_id": "2317", "公告日期": "2026-08-14", "公司名稱": "鴻海", "除權交易日": "2026-10-21", "除息交易日": "2026-10-21",
              "盈餘分配之股東現金股利(元/股)": 2.0, "法定盈餘公積、資本公積發放之現金(元/股)": 0.5,
              "盈餘轉增資配股(元/股)": 0.1, "法定盈餘公積、資本公積轉增資配股(元/股)": 0.0},
-            {"stock_id": "1101", "公司名稱": "台泥", "除權交易日": "2026-09-01", "除息交易日": pd.NaT,
+            {"stock_id": "1101", "公告日期": "2026-07-01", "公司名稱": "台泥", "除權交易日": "2026-09-01", "除息交易日": pd.NaT,
              "盈餘分配之股東現金股利(元/股)": 0.0, "法定盈餘公積、資本公積發放之現金(元/股)": 0.0,
              "盈餘轉增資配股(元/股)": 0.15, "法定盈餘公積、資本公積轉增資配股(元/股)": 0.0},
         ]
@@ -227,7 +227,7 @@ def test_dividend_announcements_shape_and_sums():
 
     assert list(out.columns) == [
         "stock_id", "company_name", "ex_rights_date", "ex_dividend_date",
-        "cash_dividend_per_share", "stock_dividend_per_share",
+        "cash_dividend_per_share", "stock_dividend_per_share", "announce_date",
     ]
     assert len(out) == 3
 
@@ -236,6 +236,7 @@ def test_dividend_announcements_shape_and_sums():
     assert tsmc["ex_dividend_date"] == pd.Timestamp("2026-10-20")
     assert tsmc["cash_dividend_per_share"] == 3.0
     assert tsmc["stock_dividend_per_share"] == 0.0
+    assert tsmc["announce_date"] == pd.Timestamp("2026-08-12")
 
     foxconn = out[out["stock_id"] == "2317"].iloc[0]
     assert foxconn["cash_dividend_per_share"] == 2.5  # two cash columns summed
@@ -245,6 +246,24 @@ def test_dividend_announcements_shape_and_sums():
     assert pd.isna(tcc["ex_dividend_date"])
     assert tcc["cash_dividend_per_share"] == 0.0
     assert tcc["stock_dividend_per_share"] == 0.15
+
+
+def test_dividend_announcements_keeps_every_announcement_of_a_corrected_event():
+    """A correction is a second row for the same stock and ex-date with a
+    later announce_date; the SDK returns both so a consumer can pick the
+    latest instead of guessing which one the table kept."""
+    rows = _dividend_rows()
+    rows.loc[len(rows)] = {
+        "stock_id": "2330", "公告日期": "2026-09-02", "公司名稱": "台積電", "除權交易日": pd.NaT,
+        "除息交易日": "2026-10-20", "盈餘分配之股東現金股利(元/股)": 3.5,
+        "法定盈餘公積、資本公積發放之現金(元/股)": 0.0, "盈餘轉增資配股(元/股)": 0.0,
+        "法定盈餘公積、資本公積轉增資配股(元/股)": 0.0,
+    }
+    out = FinLabWrapper(fetch=lambda dataset: rows).get_dividend_announcements()
+
+    tsmc = out[out["stock_id"] == "2330"].sort_values("announce_date")
+    assert list(tsmc["announce_date"]) == [pd.Timestamp("2026-08-12"), pd.Timestamp("2026-09-02")]
+    assert list(tsmc["cash_dividend_per_share"]) == [3.0, 3.5]
 
 
 def test_dividend_announcements_since_filters_on_either_date():

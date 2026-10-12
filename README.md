@@ -207,8 +207,10 @@ announcements = FinLabWrapper().get_material_announcements(stock_ids=["9958"])
 # One row per announced event: ex_rights_date (除權, stock dividend) and
 # ex_dividend_date (除息, cash dividend) can each be NaT alone;
 # cash/stock_dividend_per_share are the per-row pair of funding-source
-# columns summed. `since` keeps only rows whose either date is on or after
-# it. No per-day cache -- re-fetches the dataset every call, same posture
+# columns summed; announce_date (公告日期) is the day the row was announced
+# -- a corrected event is a second row for the same stock and ex-date with a
+# later announce_date, and both stay in the table. `since` keeps only rows
+# whose either date is on or after it. No per-day cache -- re-fetches the dataset every call, same posture
 # as get_material_announcements above.
 dividends = FinLabWrapper().get_dividend_announcements(since="2026-10-12")
 

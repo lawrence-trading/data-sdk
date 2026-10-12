@@ -308,6 +308,11 @@ class FinLabWrapper:
             stock_dividend_per_share    元/股, the equivalent pair of
                                          stock-dividend columns summed the
                                          same way, 0 when absent
+            announce_date               公告日期, the day this row was
+                                         announced; a corrected event is a
+                                         new row for the same stock and
+                                         ex-date with a later announce_date,
+                                         the old row stays in the table
 
         This method does NOT decide which of those two evaporates a market-
         cap-weighted index (a stock dividend is base-value-adjusted, not a
@@ -340,6 +345,7 @@ class FinLabWrapper:
             "ex_dividend_date": pd.to_datetime(frame["除息交易日"]),
             "cash_dividend_per_share": cash,
             "stock_dividend_per_share": stock,
+            "announce_date": pd.to_datetime(frame["公告日期"]),
         })
         if since is not None:
             since_ts = pd.Timestamp(since)
