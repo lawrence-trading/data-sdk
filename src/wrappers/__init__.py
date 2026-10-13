@@ -22,11 +22,13 @@ from .ssf_decimal_locator import (
     ssf_decimal_locator_version,
 )
 from .txo_decimal_locator import (
+    TXO_SERIES_ROOTS,
     TxoLocatorEntry,
     get_txo_decimal_locator,
     taifex_option_prod_id,
     txo_decimal_locator_calibration_day,
     txo_decimal_locator_version,
+    txo_series_kind,
 )
 
 __all__ = [
@@ -60,6 +62,8 @@ __all__ = [
     "ssf_decimal_locator_version",
     "TxoLocatorEntry",
     "get_txo_decimal_locator",
+    "TXO_SERIES_ROOTS",
+    "txo_series_kind",
     "taifex_option_prod_id",
     "txo_decimal_locator_calibration_day",
     "txo_decimal_locator_version",

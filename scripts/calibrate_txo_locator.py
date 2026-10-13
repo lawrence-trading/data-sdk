@@ -4,7 +4,7 @@ The spec is docs/pages/txo.md §2.2 in the taiwan_dashboard monorepo that
 consumes this SDK.
 
 Joins TAIFEX ``DailyMarketReportOpt`` (``TradingSession == '一般'``,
-``Contract == 'TXO'``, plain monthly contracts only) to the archived
+``Contract == 'TXO'``, monthly and W/F weekly contracts) to the archived
 ``options_day_<YYYYMMDD>_0840_i024.parquet`` on a PROD-ID this script
 reconstructs (``txo_decimal_locator.taifex_option_prod_id``), and for every
 matched contract prints ``-round(log10(Close / max(price_raw)))`` (the
@@ -62,7 +62,7 @@ def main() -> int:
     if args.all_rows:
         print(calibrated)
     n = calibrated.height
-    print(f"day={day} TXO plain-monthly contracts joined: {n}")
+    print(f"day={day} TXO monthly and weekly contracts joined: {n}")
     print("locator histogram:")
     print(calibrated.group_by("locator").len().sort("locator"))
     print(f"\ndisagreements with the root's own most common locator: {bad.height}")

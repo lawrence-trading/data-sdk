@@ -8,34 +8,46 @@ does not join Channel 4 (the options I010 feed), so this root's
 
     Fetch https://openapi.taifex.com.tw/v1/DailyMarketReportOpt for a trading
     day, keep TradingSession == '一般' and Contract == 'TXO' rows whose
-    ContractMonth(Week) is a plain 6-digit YYYYMM (monthly contract; see
+    ContractMonth(Week) is a plain 6-digit YYYYMM (monthly contract) or a
+    YYYYMM with a W/F week suffix (weekly contract; see
     ``taifex_option_prod_id`` below), derive each row's PROD-ID, join to
     /mnt/nfs/backup/fop_parquets/options_day_<YYYYMMDD>_0840_i024.parquet on
     that PROD-ID, and print round(log10(Close / max(price_raw))) alongside
     the gcd of its consecutive distinct price_raw values.
 
-Only plain monthly contracts are joined. TXO's weekly contracts
-(``ContractMonth(Week)`` carrying a ``W``/``F`` suffix in the report) are
-*not* reconstructed: checking every distinct prod_id observed with root
-``TXO`` in a real day's i024 feed (2026-10-07) against every monthly
-contract this module can reconstruct from that same day's report found an
-exact match -- all 514 traded monthly contracts, zero unexplained leftovers
-either way -- which means TXO's weeklies are carried under a different
-PROD-ID root entirely in the raw feed (not identified here; out of scope,
-since the root's one locator is already fully evidenced by the monthly
-contracts alone).
+The TXO family has three kinds of series, all carried on the same TAIFEX
+options lines (Channel 2/14) under their own 3-letter PROD-ID root:
 
-There is exactly one root today (``TXO``); the table is still keyed by root,
-and still versioned/frozen the same way as ``ssf_decimal_locator_table.py``,
-in case a second root (e.g. a weekly-options root, once identified) is ever
-added.
+* ``M`` -- the monthly series, root ``TXO``;
+* ``W`` -- the Wednesday weeklies ``TX1`` / ``TX2`` / ``TX4`` / ``TX5``
+  (week 3 of a month is the monthly itself);
+* ``F`` -- the Friday weeklies ``TXU`` / ``TXV`` / ``TXX`` / ``TXY`` /
+  ``TXZ`` (weeks 1..5; there is no ``TXW``).
+
+The week-to-root map was read off the archived raw feed
+(``/mnt/nfs/backup/fop_parquets/options_day_*_0840_i083.parquet``, 2026-08-13
+through 2026-10-08): each root is listed two weeks ahead and drops out after
+its expiry -- TX1 2026-08-19..09-02, TX2 08-26..09-09, TX4 08-13..08-26 and
+09-09..09-23, TX5 09-16..09-30, TXU 08-21..09-04, TXV 08-28..09-11,
+TXX 09-04..09-18, TXY 08-14..08-28 and 09-11..09-24 (the 09-25 holiday moved
+that expiry back a day) -- i.e. the first through fifth Wednesday or Friday of
+the month. TXZ never appeared in that window; its place follows from the
+pattern. The weeklies share the monthly's price scale and tick table
+(put-call parity at the same strike gives the same forward with locator 3 for
+TXO, TX2, TXV and TXX on 2026-10-08), so ``get_txo_decimal_locator`` answers a
+weekly root with the TXO entry rather than carrying five more frozen copies.
+A weekly contract's ``ContractMonth(Week)`` in the TAIFEX report carries a
+``W``/``F`` suffix and the week number (``202610W2``, ``202610F3``);
+``taifex_option_prod_id`` maps it to the weekly root's PROD-ID, and the
+calibration join below covers the weekly series together with the monthly one.
 
 Money stays integral: ``tick_1e4`` is in 1/10000 NTD (see
 ``ssf_decimal_locator.price_raw_to_1e4``, reused here unchanged).
 """
 
 import math
-from typing import Dict, NamedTuple, Optional
+import re
+from typing import Dict, NamedTuple, Optional, Tuple
 
 import polars as pl
 
@@ -49,13 +61,28 @@ from .txo_decimal_locator_table import (
 TXO_DECIMAL_LOCATOR_QUERY = (
     "Fetch https://openapi.taifex.com.tw/v1/DailyMarketReportOpt for a trading day, "
     "keep TradingSession == '一般' and Contract == 'TXO' rows whose "
-    "ContractMonth(Week) is a plain 6-digit YYYYMM, derive each row's PROD-ID "
+    "ContractMonth(Week) is a plain 6-digit YYYYMM or carries a W/F week suffix, "
+    "derive each row's PROD-ID "
     "(root + strike digits + a month letter, A-L for 買權 / M-X for 賣權 + the "
-    "year's last digit), join to "
+    "year's last digit; the root is TXO for a monthly and the week's weekly root "
+    "otherwise), join to "
     "/mnt/nfs/backup/fop_parquets/options_day_<YYYYMMDD>_0840_i024.parquet on "
     "that PROD-ID, and print round(log10(Close / max(price_raw))) alongside the "
     "gcd of its consecutive distinct price_raw values."
 )
+
+# The TXO family's series: PROD-ID root -> (kind, week). "M" is the monthly
+# series (week None: it is the third Wednesday's contract), "W" the Wednesday
+# weeklies, "F" the Friday weeklies. See the module docstring for the evidence.
+TXO_SERIES_ROOTS: Dict[str, Tuple[str, Optional[int]]] = {
+    "TXO": ("M", None),
+    "TX1": ("W", 1), "TX2": ("W", 2), "TX4": ("W", 4), "TX5": ("W", 5),
+    "TXU": ("F", 1), "TXV": ("F", 2), "TXX": ("F", 3), "TXY": ("F", 4), "TXZ": ("F", 5),
+}
+_WEEKLY_ROOT_BY_WEEK: Dict[Tuple[str, int], str] = {
+    (kind, week): root for root, (kind, week) in TXO_SERIES_ROOTS.items() if week is not None
+}
+_WEEKLY_MONTH = re.compile(r"^(\d{6})([WF])([1-5])$")
 
 # Real-world TAIFEX option PROD-ID convention: calls use A-L (Jan..Dec), puts
 # use M-X (Jan..Dec) -- confirmed directly against the raw i024 feed (see
@@ -74,35 +101,61 @@ class TxoLocatorEntry(NamedTuple):
     n_steps: int             # price changes the gcd was taken over (few = weak evidence)
 
 
-def taifex_option_prod_id(contract: str, contract_month: str, strike, call_put: str) -> Optional[str]:
-    """PROD-ID for one plain-monthly ``DailyMarketReportOpt`` row, or None.
+def txo_series_kind(prod_id_or_root: str) -> Optional[str]:
+    """``"M"`` / ``"W"`` / ``"F"`` for a PROD-ID or root of the TXO family
+    (monthly, Wednesday weekly, Friday weekly), None for anything else."""
+    series = TXO_SERIES_ROOTS.get(prod_id_or_root[:3])
+    return series[0] if series else None
 
-    ``contract_month`` must be a bare ``YYYYMM`` (a monthly contract); a
-    weekly contract's month field carries a ``W``/``F`` suffix and returns
-    None (see module docstring -- weeklies are out of scope here, carried
-    under a different root in the raw feed). ``strike`` is the report's own
+
+def taifex_option_prod_id(contract: str, contract_month: str, strike, call_put: str) -> Optional[str]:
+    """PROD-ID for one ``DailyMarketReportOpt`` row, or None.
+
+    ``contract_month`` is either a bare ``YYYYMM`` (a monthly contract, whose
+    root is ``contract`` itself) or ``YYYYMMW<n>`` / ``YYYYMMF<n>`` (the n-th
+    Wednesday or Friday weekly of that month, whose root is the weekly root
+    of that week, ``TX2`` / ``TXV`` ...; ``contract`` must then be ``TXO``,
+    the family the report files them under). Spread rows (``/`` in the month)
+    and unknown week numbers return None. ``strike`` is the report's own
     ``StrikePrice`` (a numeric string, no decimal point for TXO); embedded
     in the PROD-ID as a literal integer, exactly as TAIFEX publishes it in
     the raw feed. ``call_put`` is the report's own ``CallPut`` (``買權`` /
     ``賣權``).
     """
-    if "/" in contract_month or len(contract_month) != 6 or not contract_month.isdigit():
+    root = contract
+    month_digits = contract_month
+    weekly = _WEEKLY_MONTH.match(contract_month)
+    if weekly is not None:
+        if contract != "TXO":
+            return None
+        week_root = _WEEKLY_ROOT_BY_WEEK.get((weekly.group(2), int(weekly.group(3))))
+        if week_root is None:
+            return None
+        root, month_digits = week_root, weekly.group(1)
+    if "/" in month_digits or len(month_digits) != 6 or not month_digits.isdigit():
         return None
-    month = int(contract_month[4:6])
+    month = int(month_digits[4:6])
     if not 1 <= month <= 12:
         return None
-    year_digit = contract_month[3]
+    year_digit = month_digits[3]
     codes = CALL_MONTH_CODES if call_put == "買權" else PUT_MONTH_CODES
     try:
         strike_int = int(float(strike))
     except (TypeError, ValueError):
         return None
-    return f"{contract}{strike_int}{codes[month - 1]}{year_digit}"
+    return f"{root}{strike_int}{codes[month - 1]}{year_digit}"
 
 
 def get_txo_decimal_locator(prod_id_or_root: str) -> Optional[TxoLocatorEntry]:
-    """Frozen entry for a PROD-ID (``TXO24000J6``) or root (``TXO``); None if absent."""
-    entry = TXO_DECIMAL_LOCATOR_TABLE.get(prod_id_or_root[:3])
+    """Frozen entry for a PROD-ID (``TXO24000J6``) or root (``TXO``); None if
+    absent. A weekly root (``TX2``, ``TXV`` ...) answers with the monthly's
+    entry under its own root name: the weeklies share its price scale and
+    tick table (module docstring)."""
+    root = prod_id_or_root[:3]
+    entry = TXO_DECIMAL_LOCATOR_TABLE.get(root)
+    if entry is None and root in TXO_SERIES_ROOTS:
+        base = TXO_DECIMAL_LOCATOR_TABLE.get("TXO")
+        entry = (root,) + tuple(base[1:]) if base is not None else None
     if entry is None:
         return None
     return TxoLocatorEntry(*entry)
@@ -121,7 +174,8 @@ def txo_decimal_locator_calibration_day() -> str:
 # ----------------------------------------------------------------------
 
 def calibrate_locator(report, i024: pl.LazyFrame) -> pl.DataFrame:
-    """One row per TXO plain-monthly contract traded on the calibration day.
+    """One row per TXO-family contract (monthly and weekly) traded on the
+    calibration day.
 
     ``report`` is ``TaifexWrapper.get_daily_market_report_opt(day)`` (pandas,
     already ``一般``-session only); ``i024`` the day's options i024 scan.
@@ -143,7 +197,7 @@ def calibrate_locator(report, i024: pl.LazyFrame) -> pl.DataFrame:
     )
 
     joined = observed_ticks(
-        i024.filter(pl.col("prod_id").str.starts_with("TXO"))
+        i024.filter(pl.col("prod_id").str.slice(0, 3).is_in(list(TXO_SERIES_ROOTS)))
     ).join(rep_pl, on="prod_id", how="inner")
 
     def locator_of(close: str, max_raw: int) -> Optional[int]:

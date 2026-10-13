@@ -298,8 +298,11 @@ opt_report = taifex.get_daily_market_report_opt()  # TradingSession == '一般'
 
 # Frozen TXO root decimal locator/tick (docs/pages/txo.md §2.2): calibrated
 # offline against DailyMarketReportOpt + the archived i024 options feed,
-# plain-monthly contracts only (weeklies carry a different PROD-ID root).
+# the monthly series (root TXO) plus the Wednesday (TX1/TX2/TX4/TX5) and
+# Friday (TXU/TXV/TXX/TXY/TXZ) weeklies, which share its locator and tick
+# and answer under their own root. txo_series_kind() says M/W/F.
 txo_entry = get_txo_decimal_locator("TXO")
+weekly_entry = get_txo_decimal_locator("TXV49500J6")  # same scale, root "TXV"
 txo_price_1e4 = 24000 * 10 ** (4 - txo_entry.locator)
 
 # TEJ monthly revenue announcements (TWN/EWSALE, incrementally cached as CSV;
