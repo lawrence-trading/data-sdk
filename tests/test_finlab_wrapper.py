@@ -271,3 +271,103 @@ def test_dividend_announcements_since_filters_on_either_date():
 
     upcoming = wrapper.get_dividend_announcements(since="2026-10-01")
     assert set(upcoming["stock_id"]) == {"2330", "2317"}  # 1101's 2026-09-01 excluded
+
+
+# ---------------------------------------------------------------------------
+# get_trading_stats: last completed day's turnover and the trailing volume mean
+# ---------------------------------------------------------------------------
+
+TURNOVER = "price:成交金額"
+VOLUME = "price:成交股數"
+NAN = float("nan")
+
+
+def _stats_tables(volume_columns, turnover_columns=None, dates=None):
+    dates = dates or [f"2026-09-{day:02d}" for day in (8, 9, 10, 11, 14, 15, 16)]
+    turnover_columns = turnover_columns or {"2330": [1.0e9] * len(dates)}
+    return {
+        TURNOVER: _table(dates, **turnover_columns),
+        VOLUME: _table(dates, **volume_columns),
+    }
+
+
+def test_trading_stats_reports_last_day_turnover_and_the_five_day_volume_mean(cache_dir):
+    tables = _stats_tables(
+        {"2330": [9_000, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000]},
+        {"2330": [1, 2, 3, 4, 5, 6, 250_000_000.5]},
+    )
+    report_date, frame = FinLabWrapper(fetch=lambda name: tables[name]).get_trading_stats(TODAY)
+
+    assert report_date == dt.date(2026, 9, 16)
+    assert list(frame.columns) == ["prev_turnover", "avg_volume_5d_shares", "volume_days"]
+    assert frame.loc["2330", "prev_turnover"] == 250_000_000.5
+    # The five newest completed days (09-10 .. 09-16): 2k+3k+4k+5k+6k, never the 9k before them.
+    assert frame.loc["2330", "avg_volume_5d_shares"] == 4_000
+    assert frame.loc["2330", "volume_days"] == 5
+
+
+def test_trading_stats_never_averages_in_today(cache_dir):
+    dates = [f"2026-09-{day:02d}" for day in (10, 11, 14, 15, 16, 17)]
+    tables = _stats_tables(
+        {"2330": [1_000, 1_000, 1_000, 1_000, 1_000, 99_000]},
+        {"2330": [1.0] * 6},
+        dates,
+    )
+    _, frame = FinLabWrapper(fetch=lambda name: tables[name]).get_trading_stats(TODAY)
+    assert frame.loc["2330", "avg_volume_5d_shares"] == 1_000
+
+
+def test_trading_stats_skips_days_without_data_and_reaches_back_for_five(cache_dir):
+    tables = _stats_tables(
+        {"2330": [1_000, 2_000, NAN, 3_000, NAN, 4_000, 5_000]},
+    )
+    _, frame = FinLabWrapper(fetch=lambda name: tables[name]).get_trading_stats(TODAY)
+    # Five data days: 1k, 2k, 3k, 4k, 5k -- the two blank days are not days "that have data".
+    assert frame.loc["2330", "avg_volume_5d_shares"] == 3_000
+    assert frame.loc["2330", "volume_days"] == 5
+
+
+def test_trading_stats_has_no_average_below_three_data_days(cache_dir):
+    tables = _stats_tables(
+        {
+            "2330": [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000],
+            "6789": [NAN, NAN, NAN, NAN, NAN, 400, 600],
+            "5566": [NAN, NAN, NAN, NAN, 100, 200, 300],
+        },
+        {"2330": [1.0] * 7, "6789": [NAN] * 7, "5566": [1.0] * 7},
+    )
+    _, frame = FinLabWrapper(fetch=lambda name: tables[name]).get_trading_stats(TODAY)
+    assert frame["avg_volume_5d_shares"].isna()["6789"]
+    assert frame.loc["6789", "volume_days"] == 2
+    assert frame.loc["5566", "avg_volume_5d_shares"] == 200
+    assert frame.loc["5566", "volume_days"] == 3
+
+
+def test_trading_stats_turnover_is_nan_not_zero_when_the_stock_has_no_row(cache_dir):
+    tables = _stats_tables(
+        {"2330": [1_000] * 7, "6789": [500] * 7},
+        {"2330": [1.0e9] * 7, "6789": [3.0] * 6 + [NAN]},
+    )
+    _, frame = FinLabWrapper(fetch=lambda name: tables[name]).get_trading_stats(TODAY)
+    assert frame["prev_turnover"].isna()["6789"]
+    assert frame.loc["2330", "prev_turnover"] == 1.0e9
+
+
+def test_trading_stats_raises_when_the_two_tables_disagree_on_the_report_date(cache_dir):
+    tables = _stats_tables({"2330": [1_000] * 7})
+    tables[VOLUME] = tables[VOLUME].iloc[:-1]
+    wrapper = FinLabWrapper(fetch=lambda name: tables[name])
+    with pytest.raises(FinLabAlignmentError, match="turnover=2026-09-16, volume=2026-09-15"):
+        wrapper.get_trading_stats(TODAY)
+
+
+def test_trading_stats_warm_day_needs_no_fetch_or_token(cache_dir):
+    tables = _stats_tables({"2330": [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000]})
+    FinLabWrapper(fetch=lambda name: tables[name]).get_trading_stats(TODAY)
+
+    def refuse(name):
+        raise AssertionError("cache miss on a warm day")
+
+    assert "FINLAB_API_TOKEN" not in os.environ
+    _, frame = FinLabWrapper(fetch=refuse).get_trading_stats(TODAY)
+    assert frame.loc["2330", "avg_volume_5d_shares"] == 5_000

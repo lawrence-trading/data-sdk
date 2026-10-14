@@ -14,6 +14,11 @@ with no such row raises. Sibling tables must agree on that ``report_date``
 or the whole pull raises ``FinLabAlignmentError`` -- a consumer then
 degrades the affected cells, it never renders a silently older row.
 
+A second pull, ``get_trading_stats``, reads two more daily tables (``price:成交金額``
+in NTD, ``price:成交股數`` in shares) for the last completed day's turnover and a
+trailing volume average; it follows the same strictly-before-today and
+alignment rules and is cached the same way.
+
 Cache: ``DATA_SDK_FINLAB_CACHE_PATH`` (default ``/mnt/nfs/backup/finlab_cache``),
 one parquet per ``(dataset, query day)`` holding the trailing rows dated
 before that day. A warm read needs no token; a cold fetch needs
@@ -72,6 +77,19 @@ DATASETS = {
     "lending_balance": "security_lending_sell:借券賣出餘額",
     "day_trade_sell_first": "intraday_trading:得先賣後買當沖",
 }
+
+# The daily price tables behind ``get_trading_stats``: turnover in NTD and
+# volume in shares, both date-indexed with one column per stock id.
+TRADING_STATS_DATASETS = {
+    "turnover": "price:成交金額",
+    "volume": "price:成交股數",
+}
+
+# ``get_trading_stats`` averages volume over this many completed trading days
+# per stock, and reports no average for a stock with fewer than
+# ``VOLUME_MIN_DAYS`` days of data (a new listing, a long suspension).
+VOLUME_WINDOW_DAYS = 5
+VOLUME_MIN_DAYS = 3
 
 # Rows kept per cached table: enough that a holiday cluster still leaves a
 # completed trading day in the cache, small enough to be a few KB per stock.
@@ -246,6 +264,54 @@ class FinLabWrapper:
         out.index = out.index.astype(str)
         out.index.name = "stock_id"
         return report_date, out[list(DATASETS)]
+
+    def get_trading_stats(self, today: Optional[dt.date] = None) -> Tuple[dt.date, pd.DataFrame]:
+        """Last completed day's turnover and a trailing volume average per stock.
+
+        Returns ``(report_date, frame)``: ``frame`` is indexed by stock id with
+
+            prev_turnover          ``price:成交金額`` on ``report_date``, NTD
+                                   (float; NaN when the stock has no row that
+                                   day)
+            avg_volume_5d_shares   simple mean of ``price:成交股數`` over the
+                                   ``VOLUME_WINDOW_DAYS`` most recent completed
+                                   trading days *that have data for the stock*
+                                   (shares, float); today is never included.
+                                   NaN when fewer than ``VOLUME_MIN_DAYS`` days
+                                   have data
+            volume_days            how many days the average was taken over
+                                   (0..``VOLUME_WINDOW_DAYS``)
+
+        A missing cell is NaN, never 0. Both tables must share one
+        ``report_date`` (``FinLabAlignmentError`` otherwise); the caller that
+        also holds ``get_ssf_reference`` compares the two report dates itself.
+        Both tables go through ``get_table``, so a warm day needs no token and
+        the window is bounded by ``CACHE_TRAILING_ROWS``.
+        """
+        today = today or taipei_today()
+        frames = {key: self.get_table(name, today) for key, name in TRADING_STATS_DATASETS.items()}
+        report_date, rows = align_latest_rows(frames, today)
+        volume = frames["volume"].apply(pd.to_numeric, errors="coerce")
+        volume = volume.loc[volume.index < pd.Timestamp(today)]
+        has_data = volume.notna()
+        # Rank each cell among the stock's own data days, newest first: the
+        # newest data day is 1, so "<= window" keeps its most recent days.
+        newest_first = has_data.iloc[::-1].cumsum().iloc[::-1]
+        recent = volume.where(has_data & (newest_first <= VOLUME_WINDOW_DAYS))
+        days = recent.notna().sum()
+        mean = recent.mean()
+        mean[days < VOLUME_MIN_DAYS] = float("nan")
+        out = pd.DataFrame(
+            {
+                "prev_turnover": pd.to_numeric(rows["turnover"], errors="coerce"),
+                "avg_volume_5d_shares": mean,
+                "volume_days": days,
+            }
+        )
+        out["volume_days"] = out["volume_days"].fillna(0).astype(int)
+        out.index = out.index.astype(str)
+        out.index.name = "stock_id"
+        return report_date, out
 
     def get_material_announcements(
         self, stock_ids: Optional[List[str]] = None, since=None

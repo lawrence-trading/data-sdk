@@ -193,6 +193,13 @@ weights.loc["2330", "weight_per"]
 report_date, ref = FinLabWrapper().get_ssf_reference()
 ref.loc["2330", ["margin_balance", "short_balance", "lending_balance", "day_trade_sell_first"]]
 
+# Last completed day's 成交金額 (NTD) and the mean 成交股數 (shares) over the
+# five most recent completed trading days that have data for the stock (today
+# never included; NaN under three days). The two price tables must share one
+# report_date or this raises FinLabAlignmentError. Same cache as above.
+report_date, stats = FinLabWrapper().get_trading_stats()
+stats.loc["2330", ["prev_turnover", "avg_volume_5d_shares", "volume_days"]]
+
 # 重訊公告 (material-information announcements, 可轉債頁「轉換條件」用):
 # dataset id confirmed via finlab.data.search("重訊") (no login needed --
 # that search hits FinLab's public catalog, not data.get()); stock_id is
