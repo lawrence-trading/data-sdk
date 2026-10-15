@@ -9,9 +9,12 @@ import pytest
 
 from data_sdk import FinLabAlignmentError, FinLabWrapper
 from data_sdk.wrappers.finlab_wrapper import (
+    COMPANY_BASIC_INFO_DATASET,
     DATASETS,
     DIVIDEND_ANNOUNCEMENT_DATASET,
     MATERIAL_ANNOUNCEMENT_DATASET,
+    TRADING_STATS_DATASETS,
+    UNIVERSE_STATS_DATASETS,
     align_latest_rows,
     latest_before_today,
 )
@@ -371,3 +374,130 @@ def test_trading_stats_warm_day_needs_no_fetch_or_token(cache_dir):
     assert "FINLAB_API_TOKEN" not in os.environ
     _, frame = FinLabWrapper(fetch=refuse).get_trading_stats(TODAY)
     assert frame.loc["2330", "avg_volume_5d_shares"] == 5_000
+
+
+# ---------------------------------------------------------------------------
+# get_universe_stats: last completed day's volume, turnover, close and share count
+# ---------------------------------------------------------------------------
+
+CLOSE = "price:收盤價"
+
+
+def _universe_tables(dates=None):
+    dates = dates or ["2026-09-14", "2026-09-15", "2026-09-16"]
+    return {
+        TURNOVER: _table(dates, **{"2330": [9.0e10, 8.0e10, 7.5e10], "6488": [1.0e8, 2.0e8, 3.0e8]}),
+        VOLUME: _table(dates, **{"2330": [40_000_000.0, 50_000_000.0, 45_000_000.0], "6488": [1_000.0, 2_000.0, 3_000.0]}),
+        CLOSE: _table(dates, **{"2330": [1_000.0, 1_010.0, 1_005.0], "6488": [250.5, 251.0, 252.5]}),
+    }
+
+
+def _basic_info(rows):
+    return pd.DataFrame(rows, columns=["stock_id", "已發行普通股數或TDR原發行股數", "市場別"])
+
+
+def _universe_fetch(tables, info):
+    def fetch(name):
+        if name == COMPANY_BASIC_INFO_DATASET:
+            return info
+        return tables[name]
+
+    return fetch
+
+
+def test_universe_stats_reads_the_three_price_tables_and_the_company_table(cache_dir):
+    info = _basic_info([("2330", 25_932_370_067, "sii"), ("6488", 55_000_000, "otc")])
+    wrapper = FinLabWrapper(fetch=_universe_fetch(_universe_tables(), info))
+
+    report_date, frame = wrapper.get_universe_stats(TODAY)
+
+    assert report_date == dt.date(2026, 9, 16)
+    assert list(frame.columns) == [
+        "prev_volume_shares", "prev_turnover", "prev_close", "shares_outstanding", "market",
+    ]
+    assert frame.index.name == "stock_id"
+    row = frame.loc["2330"]
+    assert row["prev_volume_shares"] == 45_000_000.0
+    assert row["prev_turnover"] == 7.5e10
+    assert row["prev_close"] == 1_005.0
+    assert row["shares_outstanding"] == 25_932_370_067
+    assert row["market"] == "sii"
+    assert frame.loc["6488", "market"] == "otc"
+    assert frame.loc["6488", "prev_close"] == 252.5
+
+
+def test_universe_stats_uses_the_dataset_ids_and_leaves_the_trading_stats_pair_alone(cache_dir):
+    asked = []
+
+    def fetch(name):
+        asked.append(name)
+        if name == COMPANY_BASIC_INFO_DATASET:
+            return _basic_info([("2330", 1, "sii")])
+        return _universe_tables()[name]
+
+    FinLabWrapper(fetch=fetch).get_universe_stats(TODAY)
+
+    assert sorted(asked) == sorted([*UNIVERSE_STATS_DATASETS.values(), COMPANY_BASIC_INFO_DATASET])
+    assert UNIVERSE_STATS_DATASETS["close"] == "price:收盤價"
+    assert COMPANY_BASIC_INFO_DATASET == "company_basic_info"
+    # get_trading_stats keeps its two-table alignment gate: the close is not part of it.
+    assert set(TRADING_STATS_DATASETS) == {"turnover", "volume"}
+
+
+def test_universe_stats_a_missing_cell_is_nan_never_zero(cache_dir):
+    tables = _universe_tables()
+    tables[CLOSE] = tables[CLOSE].assign(**{"6488": [250.0, 251.0, NAN]})
+    info = _basic_info([("2330", 100, "sii")])   # 6488 is not in the company table
+    _, frame = FinLabWrapper(fetch=_universe_fetch(tables, info)).get_universe_stats(TODAY)
+
+    assert frame["prev_close"].isna()["6488"]
+    assert frame["shares_outstanding"].isna()["6488"]
+    assert frame["market"].isna()["6488"]
+    assert frame.loc["2330", "shares_outstanding"] == 100
+
+
+def test_universe_stats_includes_a_listed_company_without_a_price_row(cache_dir):
+    info = _basic_info([("2330", 100, "sii"), ("7806", 29_253_000, "rotc")])
+    _, frame = FinLabWrapper(fetch=_universe_fetch(_universe_tables(), info)).get_universe_stats(TODAY)
+
+    assert frame.loc["7806", "market"] == "rotc"
+    assert frame.loc["7806", "shares_outstanding"] == 29_253_000
+    assert frame[["prev_volume_shares", "prev_turnover", "prev_close"]].loc["7806"].isna().all()
+
+
+def test_universe_stats_a_non_positive_share_count_is_missing(cache_dir):
+    info = _basic_info([("2330", 0, "sii"), ("6488", -5, "otc")])
+    _, frame = FinLabWrapper(fetch=_universe_fetch(_universe_tables(), info)).get_universe_stats(TODAY)
+
+    assert frame["shares_outstanding"].isna().all()
+
+
+def test_universe_stats_keeps_the_last_row_of_a_duplicated_company(cache_dir):
+    info = _basic_info([("2330", 100, "sii"), ("2330", 200, "sii")])
+    _, frame = FinLabWrapper(fetch=_universe_fetch(_universe_tables(), info)).get_universe_stats(TODAY)
+
+    assert frame.loc["2330", "shares_outstanding"] == 200
+
+
+def test_universe_stats_raises_when_the_close_lags_the_other_two(cache_dir):
+    tables = _universe_tables()
+    tables[CLOSE] = tables[CLOSE].iloc[:-1]
+    info = _basic_info([("2330", 100, "sii")])
+    wrapper = FinLabWrapper(fetch=_universe_fetch(tables, info))
+
+    with pytest.raises(FinLabAlignmentError, match="close=2026-09-15"):
+        wrapper.get_universe_stats(TODAY)
+
+
+def test_universe_stats_warm_day_needs_no_price_fetch_or_token(cache_dir):
+    info = _basic_info([("2330", 100, "sii")])
+    FinLabWrapper(fetch=_universe_fetch(_universe_tables(), info)).get_universe_stats(TODAY)
+
+    def only_the_company_table(name):
+        if name != COMPANY_BASIC_INFO_DATASET:
+            raise AssertionError("cache miss on a warm day")
+        return info
+
+    _, frame = FinLabWrapper(fetch=only_the_company_table).get_universe_stats(TODAY)
+
+    assert frame.loc["2330", "prev_close"] == 1_005.0

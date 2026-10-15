@@ -200,6 +200,14 @@ ref.loc["2330", ["margin_balance", "short_balance", "lending_balance", "day_trad
 report_date, stats = FinLabWrapper().get_trading_stats()
 stats.loc["2330", ["prev_turnover", "avg_volume_5d_shares", "volume_days"]]
 
+# Last completed day's 成交股數 / 成交金額 / 收盤價 (the three price tables share
+# one report_date or this raises FinLabAlignmentError) joined with the
+# company_basic_info table's 已發行普通股數或TDR原發行股數 and 市場別 ("sii" 上市,
+# "otc" 上櫃, "rotc" 興櫃). Turnover rate and market cap are the caller's to
+# compute from these; a missing cell is NaN. Price tables share the cache above.
+report_date, universe = FinLabWrapper().get_universe_stats()
+universe.loc["2330", ["prev_volume_shares", "prev_turnover", "prev_close", "shares_outstanding", "market"]]
+
 # 重訊公告 (material-information announcements, 可轉債頁「轉換條件」用):
 # dataset id confirmed via finlab.data.search("重訊") (no login needed --
 # that search hits FinLab's public catalog, not data.get()); stock_id is

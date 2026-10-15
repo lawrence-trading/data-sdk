@@ -19,6 +19,12 @@ in NTD, ``price:成交股數`` in shares) for the last completed day's turnover 
 trailing volume average; it follows the same strictly-before-today and
 alignment rules and is cached the same way.
 
+A third pull, ``get_universe_stats``, reads ``price:成交金額``, ``price:成交股數`` and
+``price:收盤價`` aligned to one report date, plus the undated ``company_basic_info``
+table's issued share count and listing market, for the last completed day's
+volume, turnover, close, and the share count that turns them into a turnover
+rate and a market capitalisation.
+
 Cache: ``DATA_SDK_FINLAB_CACHE_PATH`` (default ``/mnt/nfs/backup/finlab_cache``),
 one parquet per ``(dataset, query day)`` holding the trailing rows dated
 before that day. A warm read needs no token; a cold fetch needs
@@ -84,6 +90,23 @@ TRADING_STATS_DATASETS = {
     "turnover": "price:成交金額",
     "volume": "price:成交股數",
 }
+
+# The daily price tables behind ``get_universe_stats``: the close in NTD joins
+# the two ``get_trading_stats`` tables. A separate map, so the alignment gate of
+# ``get_trading_stats`` (turnover and volume only) is unchanged.
+UNIVERSE_STATS_DATASETS = {
+    "turnover": "price:成交金額",
+    "volume": "price:成交股數",
+    "close": "price:收盤價",
+}
+
+# 公司基本資料, one row per company (undated): the issued ordinary share count
+# (or the originally issued TDR units) and the listing market -- "sii" 上市,
+# "otc" 上櫃, "rotc" 興櫃. Confirmed 2026-10-15 against an already-fetched local
+# copy (~/finlab_db/company_basic_info.feather, 2,352 rows).
+COMPANY_BASIC_INFO_DATASET = "company_basic_info"
+SHARES_OUTSTANDING_COLUMN = "已發行普通股數或TDR原發行股數"
+LISTING_MARKET_COLUMN = "市場別"
 
 # ``get_trading_stats`` averages volume over this many completed trading days
 # per stock, and reports no average for a stock with fewer than
@@ -312,6 +335,55 @@ class FinLabWrapper:
         out.index = out.index.astype(str)
         out.index.name = "stock_id"
         return report_date, out
+
+    def get_universe_stats(self, today: Optional[dt.date] = None) -> Tuple[dt.date, pd.DataFrame]:
+        """Last completed day's volume, turnover and close, and the issued share
+        count, for every stock FinLab knows.
+
+        Returns ``(report_date, frame)``: ``frame`` is indexed by stock id with
+
+            prev_volume_shares   ``price:成交股數`` on ``report_date`` (shares,
+                                 float)
+            prev_turnover        ``price:成交金額`` on ``report_date``, NTD
+                                 (float)
+            prev_close           ``price:收盤價`` on ``report_date``, NTD per
+                                 share (float)
+            shares_outstanding   ``company_basic_info``'s 已發行普通股數或TDR原發行
+                                 股數 (shares, float; NaN for a stock without a
+                                 positive count)
+            market               ``company_basic_info``'s 市場別 ("sii", "otc",
+                                 "rotc"; NaN for a stock it does not list)
+
+        The turnover rate (volume / shares) and the market capitalisation
+        (close x shares) are the consumer's to compute. A missing cell is NaN,
+        never 0, and the index is the union of the three price tables' stocks
+        and ``company_basic_info``'s. The three price tables must share one
+        ``report_date`` (``FinLabAlignmentError`` otherwise) and go through
+        ``get_table``, so a warm day needs no token; ``company_basic_info`` is
+        one undated table fetched on every call through ``_fetch_dataset``
+        (like ``get_dividend_announcements``) and not cached.
+        """
+        today = today or taipei_today()
+        frames = {key: self.get_table(name, today) for key, name in UNIVERSE_STATS_DATASETS.items()}
+        report_date, rows = align_latest_rows(frames, today)
+        prices = pd.DataFrame(
+            {
+                "prev_volume_shares": pd.to_numeric(rows["volume"], errors="coerce"),
+                "prev_turnover": pd.to_numeric(rows["turnover"], errors="coerce"),
+                "prev_close": pd.to_numeric(rows["close"], errors="coerce"),
+            }
+        )
+        info = pd.DataFrame(self._fetch_dataset(COMPANY_BASIC_INFO_DATASET)).copy()
+        info["stock_id"] = info["stock_id"].astype(str)
+        info = info.drop_duplicates("stock_id", keep="last").set_index("stock_id")
+        shares = pd.to_numeric(info[SHARES_OUTSTANDING_COLUMN], errors="coerce")
+        company = pd.DataFrame(
+            {"shares_outstanding": shares.where(shares > 0), "market": info[LISTING_MARKET_COLUMN]}
+        )
+        prices.index = prices.index.astype(str)
+        out = prices.join(company, how="outer")
+        out.index.name = "stock_id"
+        return report_date, out.sort_index()
 
     def get_material_announcements(
         self, stock_ids: Optional[List[str]] = None, since=None
