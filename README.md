@@ -46,6 +46,19 @@ pre_open = (
 )
 ```
 
+`get_order_book_stocks` reads two sources of the same Format 6 feed, chosen with `mode`:
+
+- `mode="native"`: our own capture in `DATA_SDK_ORDER_BOOK_PARQUET_PATH` (from 2025-05-20).
+- `mode="tej"`: the TEJ conversion in `DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH` (2020-06-01 to 2026-06-30). `timestamp` is null.
+- `mode="merged"` (default): both, joined on `transmission_number`. TEJ rows, plus native rows whose `transmission_number` TEJ lacks, in `transmission_number` order. A day in only one source returns that source. `cumulative_volume` is Int64.
+
+Filters on the returned `LazyFrame` still reach both parquet files in `merged` mode.
+
+```python
+native = get_order_book_stocks("2026-01-02", is_twse=True, mode="native")
+tej    = get_order_book_stocks("2022-03-01", is_twse=False, mode="tej")
+```
+
 ## Installation
 
 1.  Clone the repository:
@@ -79,6 +92,7 @@ export DATA_SDK_FINMIND_BROKER_WARRANT_PATH="/mnt/nfs/backup/finmind_broker/warr
 export DATA_SDK_SHIOAJI_TICKS_PATH="/mnt/nfs/backup/shioaji_ticks"
 export DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH="/mnt/nfs/backup/shioaji_futures_ticks"
 export DATA_SDK_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/parquets"
+export DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/tej_parquets"  # defaults to this path if unset
 export DATA_SDK_TEJ_CACHE_PATH="/mnt/nfs/backup/tej_cache"
 export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"
 ```
@@ -180,7 +194,9 @@ issuer_map = warrant_info.build_issuer_map()      # {warrant_id: issuer_name}
 
 # Order book from parquet (requires DATA_SDK_ORDER_BOOK_PARQUET_PATH)
 df_ob = get_order_book_stocks("2026-01-02", is_twse=True, sid="2330")
-df_ob_day = get_order_book_stocks("2026-01-02", is_twse=True)  # entire day
+df_ob_day = get_order_book_stocks("2026-01-02", is_twse=True)  # entire day, native + TEJ merged
+df_ob_native = get_order_book_stocks("2026-01-02", is_twse=True, mode="native")  # own capture only
+df_ob_tej = get_order_book_stocks("2021-06-29", is_twse=True, mode="tej")        # TEJ only
 df_odd = get_order_book_odd_lots("2026-01-02", is_twse=True, sid="2330")
 df_warrant = get_order_book_warrant("2026-01-02", is_twse=True)           # all warrants
 df_w_sid   = get_order_book_warrant("2026-01-02", is_twse=True, sid="700339")  # single warrant
