@@ -133,6 +133,16 @@ def test_sid_and_match_time_format_apply_in_every_mode(dirs, mode):
     assert out["transmission_number"].tolist() == expected
 
 
+def test_merged_without_tej_path_set_returns_native_and_warns(dirs, tmp_path, monkeypatch, capsys):
+    native, tej = dirs
+    _write(native / NAME, [1, 2], deal_price=10.0, timestamp=CAPTURED)
+    _write(tej / NAME, [1, 2, 3], deal_price=20.0, timestamp=None)
+    monkeypatch.delenv("DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH")
+    monkeypatch.chdir(tmp_path)  # no twseudp_* file at the top level, so "." has no TEJ day
+    assert _read("merged").equals(pl.read_parquet(native / NAME))
+    assert "DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH not set" in capsys.readouterr().err
+
+
 def test_unknown_mode_is_rejected(dirs):
     with pytest.raises(ValueError):
         get_order_book_stocks(DAY, is_twse=True, mode="both")

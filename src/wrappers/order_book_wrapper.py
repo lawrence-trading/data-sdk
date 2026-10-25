@@ -75,7 +75,7 @@ def get_order_book_stocks(
     """Load order book (regular lots) from parquet for a given day, optionally filtered by stock.
 
     Native parquet path is taken from DATA_SDK_ORDER_BOOK_PARQUET_PATH (e.g. /mnt/nfs/backup/parquets);
-    TEJ parquet path from DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH (default /mnt/nfs/backup/tej_parquets).
+    TEJ parquet path from DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH (e.g. /mnt/nfs/backup/tej_parquets).
     Files are named twseudp_YYYYMMDD_0825_all.parquet (TWSE) or otcudp_YYYYMMDD_0825_all.parquet (OTC)
     in both directories, with the same 36 columns.
 
