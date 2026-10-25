@@ -18,21 +18,25 @@ def _tej_order_book_base_path() -> Path:
 
 
 def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
-    """Scan one day of regular-lot Format 6 from the native capture, the TEJ conversion, or both.
-
-    merged: the TEJ file when it exists, otherwise the native file. One parquet is read
-    either way; FileNotFoundError is raised here when neither exists.
-    """
+    """Scan one day of regular-lot Format 6; FileNotFoundError at the call when the file is missing."""
     name = f"{'twseudp' if is_twse else 'otcudp'}_{day_plain}_0825_all.parquet"
-    if mode == "native":
-        return pl.scan_parquet(str(_order_book_base_path() / name))
-    tej_path = _tej_order_book_base_path() / name
-    if mode == "tej" or tej_path.exists():
+    tej_path, native_path = _tej_order_book_base_path() / name, _order_book_base_path() / name
+
+    if mode == "tej":
+        if not tej_path.exists():
+            raise FileNotFoundError(tej_path)
         return pl.scan_parquet(str(tej_path))
-    native_path = _order_book_base_path() / name
+
+    if mode == "native":
+        if not native_path.exists():
+            raise FileNotFoundError(native_path)
+        return pl.scan_parquet(str(native_path))
+
+    if tej_path.exists():
+        return pl.scan_parquet(str(tej_path))
     if native_path.exists():
         return pl.scan_parquet(str(native_path))
-    raise FileNotFoundError(f"no order book for {day_plain}: {tej_path}, {native_path}")
+    raise FileNotFoundError(f"{tej_path}, {native_path}")
 
 
 def _format_match_time(df_lazy: pl.LazyFrame) -> pl.LazyFrame:
@@ -80,7 +84,7 @@ def get_order_book_stocks(
         mode: "native" reads the native capture only (the behaviour before this option).
             "tej" reads the TEJ conversion only (2020-06-01 .. 2026-06-30; timestamp is null).
             "merged" (default) reads the TEJ file when the day has one, otherwise the
-            native file. A day in neither raises FileNotFoundError at the call.
+            native file. A missing file raises FileNotFoundError at the call in every mode.
 
     Returns:
         pandas DataFrame or polars LazyFrame. match_time is formatted as HH:MM:SS.ffffff

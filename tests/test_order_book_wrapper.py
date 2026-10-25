@@ -97,18 +97,19 @@ def test_merged_is_the_default_mode(dirs):
     assert lf.collect()["transmission_number"].to_list() == [1, 2]
 
 
-@pytest.mark.parametrize("mode", ["native", "tej"])
-def test_missing_day_raises_file_not_found(dirs, mode):
-    lf = get_order_book_stocks(DAY, is_twse=True, lazy=True, mode=mode)  # lazy: raised at collect
-    with pytest.raises(FileNotFoundError):
-        lf.collect()
-    with pytest.raises(FileNotFoundError):
-        get_order_book_stocks(DAY, is_twse=True, mode=mode)
-
-
-def test_merged_missing_day_raises_at_the_call_even_when_lazy(dirs):
+@pytest.mark.parametrize("mode", ["native", "tej", "merged"])
+def test_missing_day_raises_at_the_call_even_when_lazy(dirs, mode):
     with pytest.raises(FileNotFoundError, match=NAME):
-        get_order_book_stocks(DAY, is_twse=True, lazy=True, mode="merged")
+        get_order_book_stocks(DAY, is_twse=True, lazy=True, mode=mode)
+
+
+@pytest.mark.parametrize("mode", ["native", "tej"])
+def test_native_and_tej_modes_do_not_fall_back_to_the_other_file(dirs, mode):
+    native, tej = dirs
+    other = tej if mode == "native" else native
+    _write(other / NAME, [1, 2], deal_price=10.0, timestamp=CAPTURED)
+    with pytest.raises(FileNotFoundError, match=NAME):
+        get_order_book_stocks(DAY, is_twse=True, lazy=True, mode=mode)
 
 
 @pytest.mark.parametrize("mode", ["native", "tej", "merged"])
