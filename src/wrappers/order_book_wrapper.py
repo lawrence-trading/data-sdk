@@ -1,19 +1,14 @@
-import os
-import sys
 from pathlib import Path
 from typing import Optional, Union
 
 import pandas as pd
 import polars as pl
 
+from .paths import env_path
+
+
 def _order_book_base_path() -> Path:
-    base = Path(os.environ.get("DATA_SDK_ORDER_BOOK_PARQUET_PATH", "."))
-    if not os.environ.get("DATA_SDK_ORDER_BOOK_PARQUET_PATH"):
-        print(
-            "Warning: DATA_SDK_ORDER_BOOK_PARQUET_PATH not set. Using current directory.",
-            file=sys.stderr,
-        )
-    return base
+    return env_path("DATA_SDK_ORDER_BOOK_PARQUET_PATH")
 
 
 def _format_match_time(df_lazy: pl.LazyFrame) -> pl.LazyFrame:
