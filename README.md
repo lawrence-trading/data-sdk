@@ -50,7 +50,7 @@ pre_open = (
 
 - `mode="native"`: our own capture in `DATA_SDK_ORDER_BOOK_PARQUET_PATH` (from 2025-05-20).
 - `mode="tej"`: the TEJ conversion in `DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH` (2020-06-01 to 2026-06-30). `timestamp` is null.
-- `mode="merged"` (default): both, joined on `transmission_number`. TEJ rows, plus native rows whose `transmission_number` TEJ lacks, in `transmission_number` order. A day in only one source returns that source. `cumulative_volume` is Int64.
+- `mode="merged"` (default): both, joined on `transmission_number`. TEJ rows, plus native rows whose `transmission_number` TEJ lacks, in `transmission_number` order. A day in only one source returns that source.
 
 Filters on the returned `LazyFrame` still reach both parquet files in `merged` mode.
 

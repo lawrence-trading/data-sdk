@@ -92,8 +92,7 @@ def get_order_book_stocks(
             "tej" reads the TEJ conversion only (2020-06-01 .. 2026-06-30; timestamp is null).
             "merged" (default) reads both and joins them on transmission_number: TEJ rows,
             plus native rows whose transmission_number TEJ lacks, in transmission_number
-            order, with cumulative_volume as Int64. Rows with the same transmission_number
-            are taken to be the same message.
+            order. Rows with the same transmission_number are taken to be the same message.
 
     Returns:
         pandas DataFrame or polars LazyFrame. match_time is formatted as HH:MM:SS.ffffff
