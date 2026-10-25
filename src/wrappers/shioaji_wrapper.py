@@ -3,7 +3,8 @@ import time
 import pandas as pd
 import shioaji as sj
 from pathlib import Path
-import sys
+
+from .paths import env_path
 
 class ShioajiWrapper:
     _api = None
@@ -81,6 +82,14 @@ class ShioajiWrapper:
                 )
             time.sleep(0.1)
 
+    @staticmethod
+    def ticks_dir() -> Path:
+        return env_path("DATA_SDK_SHIOAJI_TICKS_PATH")
+
+    @staticmethod
+    def futures_ticks_dir() -> Path:
+        return env_path("DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH")
+
     def _download_ticks_to_parquet(self, day, sid, dest_path: Path, data_dir: Path) -> pd.DataFrame:
         self._ensure_contracts_fetched()
 
@@ -97,9 +106,7 @@ class ShioajiWrapper:
 
     def get_order_book(self, day, sid):
         # Determine parquet path
-        data_dir = Path(os.environ.get("DATA_SDK_SHIOAJI_TICKS_PATH", "."))
-        if not os.environ.get("DATA_SDK_SHIOAJI_TICKS_PATH"):
-            print("Warning: DATA_SDK_SHIOAJI_TICKS_PATH not set. Using current directory.", file=sys.stderr)
+        data_dir = ShioajiWrapper.ticks_dir()
 
         dest_path = data_dir / f"{sid}_{day}.parquet"
 
@@ -140,9 +147,7 @@ class ShioajiWrapper:
         re-downloaded.
         """
         # Determine parquet path
-        data_dir = Path(os.environ.get("DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH", "."))
-        if not os.environ.get("DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH"):
-            print("Warning: DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH not set. Using current directory.", file=sys.stderr)
+        data_dir = ShioajiWrapper.futures_ticks_dir()
 
         dest_path = data_dir / f"{code}_{day}.parquet"
 

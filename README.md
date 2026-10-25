@@ -70,8 +70,8 @@ Set the following environment variables to configure the SDK:
 
 ### Cache Storage Paths
 These variables govern where downloaded data is cached and read from.
-If not set, they default to the current working directory, except
-`DATA_SDK_TEJ_CACHE_PATH`, which defaults to `/mnt/nfs/backup/tej_cache`.
+If one is not set, it defaults to the current working directory and a
+warning is printed to stderr.
 
 ```bash
 export DATA_SDK_FINMIND_BROKER_PATH="/mnt/nfs/backup/finmind_broker"
@@ -80,7 +80,7 @@ export DATA_SDK_SHIOAJI_TICKS_PATH="/mnt/nfs/backup/shioaji_ticks"
 export DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH="/mnt/nfs/backup/shioaji_futures_ticks"
 export DATA_SDK_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/parquets"
 export DATA_SDK_TEJ_CACHE_PATH="/mnt/nfs/backup/tej_cache"
-export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"  # defaults to this path if unset
+export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"
 ```
 
 ### API Keys
@@ -188,7 +188,7 @@ df_w_sid   = get_order_book_warrant("2026-01-02", is_twse=True, sid="700339")  #
 
 ### TAIFEX futures/options (FOP) parquet
 
-Raw TAIFEX market-data parquets (requires `DATA_SDK_FOP_PARQUET_PATH`, defaults to `/mnt/nfs/backup/fop_parquets`).
+Raw TAIFEX market-data parquets (requires `DATA_SDK_FOP_PARQUET_PATH`).
 Formats: `i024` deals, `i081` order-book deltas, `i083` session-open order-book snapshots,
 `i084` snapshot-channel refresh cycles (only captured for recent dates, ~2026-06-26 onward).
 

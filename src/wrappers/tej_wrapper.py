@@ -4,18 +4,19 @@ from typing import Optional
 
 import pandas as pd
 
+from .paths import env_path
+
 
 class TEJWrapper:
     """TEJ (tejapi) datasets with an incremental CSV cache.
 
-    The cache directory comes from ``DATA_SDK_TEJ_CACHE_PATH`` (default
+    The cache directory comes from ``DATA_SDK_TEJ_CACHE_PATH`` (e.g.
     ``/mnt/nfs/backup/tej_cache``); the API key from ``TEJ_API_TOKEN``
     (required). tejapi configuration is global module state, so it is
     applied once per process.
     """
 
     _configured = False
-    _DEFAULT_CACHE_DIR = "/mnt/nfs/backup/tej_cache"
 
     #: Subscription floor for TWN/EWSALE (dataStartYear = 2021).
     EWSALE_MIN_DATE = "2021-01-01"
@@ -46,7 +47,7 @@ class TEJWrapper:
 
     @staticmethod
     def _cache_dir():
-        path = os.environ.get("DATA_SDK_TEJ_CACHE_PATH", TEJWrapper._DEFAULT_CACHE_DIR)
+        path = str(env_path("DATA_SDK_TEJ_CACHE_PATH"))
         os.makedirs(path, exist_ok=True)
         return path
 
