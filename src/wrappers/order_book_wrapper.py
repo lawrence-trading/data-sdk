@@ -1,12 +1,17 @@
+import os
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import pandas as pd
 import polars as pl
 
 from .paths import env_path
 
 _ORDER_BOOK_MODES = ("native", "tej", "merged")
+_KEY = "transmission_number"
+# (native path, size, mtime, tej path, size, mtime) -> native transmission numbers TEJ lacks.
+_NATIVE_ONLY_KEYS: Dict[Tuple, List[int]] = {}
 
 
 def _order_book_base_path() -> Path:
@@ -15,6 +20,33 @@ def _order_book_base_path() -> Path:
 
 def _tej_order_book_base_path() -> Path:
     return env_path("DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH")
+
+
+def _native_only_keys(native_path: Path, tej_path: Path) -> List[int]:
+    """Transmission numbers present in the native file and absent from the TEJ file.
+
+    Both files are in transmission_number order and TEJ numbers run from 1 with few
+    gaps, so the set is found from the TEJ key column alone (range plus gaps) and one
+    filtered read of the native key column. It is small (tens of rows on most days)
+    and cached per file pair for the life of the process.
+    """
+    ns, ts = os.stat(native_path), os.stat(tej_path)
+    cache_key = (str(native_path), ns.st_size, ns.st_mtime_ns, str(tej_path), ts.st_size, ts.st_mtime_ns)
+    if cache_key not in _NATIVE_ONLY_KEYS:
+        tej_keys = pl.scan_parquet(str(tej_path)).select(_KEY).collect()[_KEY].to_numpy()
+        if len(tej_keys) == 0:
+            cond = pl.lit(True)
+        else:
+            lo, hi = int(tej_keys[0]), int(tej_keys[-1])
+            steps = np.nonzero(np.diff(tej_keys) > 1)[0]
+            gaps = np.concatenate([np.arange(tej_keys[i] + 1, tej_keys[i + 1]) for i in steps]) if len(steps) else None
+            cond = (pl.col(_KEY) < lo) | (pl.col(_KEY) > hi)
+            if gaps is not None:
+                cond = cond | pl.col(_KEY).is_in(pl.Series(gaps, dtype=pl.Int32).implode())
+        _NATIVE_ONLY_KEYS[cache_key] = (
+            pl.scan_parquet(str(native_path)).select(_KEY).filter(cond).collect()[_KEY].to_list()
+        )
+    return _NATIVE_ONLY_KEYS[cache_key]
 
 
 def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
@@ -38,12 +70,14 @@ def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
     native = pl.scan_parquet(str(native_path)).with_columns(pl.col("cumulative_volume").cast(pl.Int64))
     if not tej_path.exists():
         return native
-    key = "transmission_number"
-    # A second scan of the TEJ file for the keys: reusing the first one makes polars cache
-    # the shared scan, and a caller's filter then no longer reaches the TEJ parquet.
-    tej_keys = pl.scan_parquet(str(tej_path), cache=False).select(key)
-    native_only = native.join(tej_keys, on=key, how="anti").sort(key)
-    return pl.scan_parquet(str(tej_path)).merge_sorted(native_only, key=key)
+    tej = pl.scan_parquet(str(tej_path))
+    keys = _native_only_keys(native_path, tej_path)
+    if not keys:
+        return tej
+    # The key literal keeps the column's dtype so the native scan prunes row groups on it.
+    # concat + sort beats merge_sorted here by about 2.5x and still lets filters push down.
+    native_only = native.filter(pl.col(_KEY).is_in(pl.Series(keys, dtype=pl.Int32).implode()))
+    return pl.concat([tej, native_only]).sort(_KEY)
 
 
 def _format_match_time(df_lazy: pl.LazyFrame) -> pl.LazyFrame:

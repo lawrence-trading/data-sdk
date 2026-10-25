@@ -84,6 +84,13 @@ def test_merged_takes_tej_rows_and_keeps_native_only_rows_in_tn_order(dirs):
     assert out.columns == [name for name, _ in COLUMNS]
 
 
+def test_merged_returns_only_tej_when_native_adds_no_transmission_numbers(dirs):
+    native, tej = dirs
+    _write(native / NAME, [2, 3], deal_price=10.0, timestamp=CAPTURED)
+    _write(tej / NAME, [1, 2, 3, 4], deal_price=20.0, timestamp=None)
+    assert _read("merged").equals(pl.read_parquet(tej / NAME))
+
+
 def test_merged_is_the_default_mode(dirs):
     native, tej = dirs
     _write(native / NAME, [1, 6], deal_price=10.0, timestamp=CAPTURED)
