@@ -34,7 +34,7 @@ def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
     native_path = _order_book_base_path() / name
     if not native_path.exists():
         return pl.scan_parquet(str(tej_path if tej_path.exists() else native_path))
-    # Native files before 2026-02-23 store cumulative_volume as int32; TEJ files use int64.
+    # cumulative_volume is cast to Int64 so both sources always line up.
     native = pl.scan_parquet(str(native_path)).with_columns(pl.col("cumulative_volume").cast(pl.Int64))
     if not tej_path.exists():
         return native
