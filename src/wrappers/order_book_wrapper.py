@@ -48,8 +48,8 @@ def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
 
     merged: the TEJ file plus the native rows whose transmission_number TEJ lacks, in
     transmission_number order (rows with the same transmission_number are the same
-    message in both files). With only one file present that file is returned; with
-    neither, the native scan is returned so the FileNotFoundError matches mode="native".
+    message in both files). Both files must exist, otherwise FileNotFoundError is
+    raised here, before any scan is built.
     """
     name = f"{'twseudp' if is_twse else 'otcudp'}_{day_plain}_0825_all.parquet"
     if mode == "native":
@@ -59,9 +59,10 @@ def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
         return pl.scan_parquet(str(tej_path))
 
     native_path = _order_book_base_path() / name
-    if not native_path.exists():
-        return pl.scan_parquet(str(tej_path if tej_path.exists() else native_path))
-    if not tej_path.exists() or pq.read_metadata(str(tej_path)).num_rows == 0:
+    missing = [str(p) for p in (native_path, tej_path) if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"mode='merged' needs both files; missing: {', '.join(missing)}")
+    if pq.read_metadata(str(tej_path)).num_rows == 0:  # an empty TEJ day adds nothing
         return pl.scan_parquet(str(native_path))
     tej = pl.scan_parquet(str(tej_path))
     extra = _native_only_rows(native_path, tej_path)
@@ -116,7 +117,9 @@ def get_order_book_stocks(
             "tej" reads the TEJ conversion only (2020-06-01 .. 2026-06-30; timestamp is null).
             "merged" (default) reads both: the TEJ file plus the native rows whose
             transmission_number TEJ lacks, in transmission_number order. Rows with the
-            same transmission_number are taken to be the same message.
+            same transmission_number are taken to be the same message. Both files must
+            exist; a day present in only one source raises FileNotFoundError at the
+            call, so use "native" or "tej" for days outside the overlap.
 
     Returns:
         pandas DataFrame or polars LazyFrame. match_time is formatted as HH:MM:SS.ffffff
