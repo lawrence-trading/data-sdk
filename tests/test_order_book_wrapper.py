@@ -73,22 +73,20 @@ def test_native_and_tej_modes_read_their_own_directory(dirs):
     assert _read("tej").equals(pl.read_parquet(tej / NAME))
 
 
-def test_merged_takes_tej_rows_and_keeps_native_only_rows_in_tn_order(dirs):
+def test_merged_returns_tej_when_both_files_exist(dirs):
     native, tej = dirs
     _write(native / NAME, [1, 2, 4, 6], deal_price=10.0, timestamp=CAPTURED)
     _write(tej / NAME, [1, 2, 3, 4, 5], deal_price=20.0, timestamp=None)
-    out = _read("merged")
-    assert out["transmission_number"].to_list() == [1, 2, 3, 4, 5, 6]
-    assert out["deal_price"].to_list() == [20.0] * 5 + [10.0]
-    assert out["timestamp"].is_null().to_list() == [True] * 5 + [False]
-    assert out.columns == [name for name, _ in COLUMNS]
-
-
-def test_merged_returns_only_tej_when_native_adds_no_transmission_numbers(dirs):
-    native, tej = dirs
-    _write(native / NAME, [2, 3], deal_price=10.0, timestamp=CAPTURED)
-    _write(tej / NAME, [1, 2, 3, 4], deal_price=20.0, timestamp=None)
     assert _read("merged").equals(pl.read_parquet(tej / NAME))
+
+
+def test_merged_returns_the_only_file_present(dirs):
+    native, tej = dirs
+    _write(tej / NAME, [1, 2, 3], deal_price=20.0, timestamp=None)
+    assert _read("merged").equals(pl.read_parquet(tej / NAME))
+    (tej / NAME).unlink()
+    _write(native / NAME, [1, 2], deal_price=10.0, timestamp=CAPTURED)
+    assert _read("merged").equals(pl.read_parquet(native / NAME))
 
 
 def test_merged_is_the_default_mode(dirs):
@@ -96,28 +94,7 @@ def test_merged_is_the_default_mode(dirs):
     _write(native / NAME, [1, 6], deal_price=10.0, timestamp=CAPTURED)
     _write(tej / NAME, [1, 2], deal_price=20.0, timestamp=None)
     lf = get_order_book_stocks(DAY, is_twse=True, lazy=True, format_match_time=False)
-    assert lf.collect()["transmission_number"].to_list() == [1, 2, 6]
-
-
-def test_merged_raises_at_the_call_when_either_file_is_missing(dirs):
-    native, tej = dirs
-    _write(native / NAME, [1, 2], deal_price=10.0, timestamp=CAPTURED)
-    with pytest.raises(FileNotFoundError, match=str(tej / NAME)):
-        get_order_book_stocks(DAY, is_twse=True, lazy=True, mode="merged")
-    (native / NAME).unlink()
-    _write(tej / NAME, [1, 2, 3], deal_price=20.0, timestamp=None)
-    with pytest.raises(FileNotFoundError, match=str(native / NAME)):
-        get_order_book_stocks(DAY, is_twse=True, lazy=True, mode="merged")
-    assert _read("tej").equals(pl.read_parquet(tej / NAME))
-
-
-def test_merged_reconciles_an_int32_native_cumulative_volume(dirs):
-    native, tej = dirs
-    _write(native / NAME, [1, 2, 4], deal_price=10.0, timestamp=CAPTURED, cumulative_dtype=pl.Int32)
-    _write(tej / NAME, [1, 2, 3], deal_price=20.0, timestamp=None)
-    out = _read("merged")
-    assert out.schema["cumulative_volume"] == pl.Int64
-    assert out["transmission_number"].to_list() == [1, 2, 3, 4]
+    assert lf.collect()["transmission_number"].to_list() == [1, 2]
 
 
 @pytest.mark.parametrize("mode", ["native", "tej"])
@@ -130,7 +107,7 @@ def test_missing_day_raises_file_not_found(dirs, mode):
 
 
 def test_merged_missing_day_raises_at_the_call_even_when_lazy(dirs):
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match=NAME):
         get_order_book_stocks(DAY, is_twse=True, lazy=True, mode="merged")
 
 
@@ -143,18 +120,17 @@ def test_sid_and_match_time_format_apply_in_every_mode(dirs, mode):
     assert isinstance(out, pd.DataFrame)
     assert set(out["stock_code"]) == {"2330"}
     assert out["match_time"].iloc[0] == "09:00:01.000000"
-    expected = {"native": [1, 7], "tej": [1, 3, 5], "merged": [1, 3, 5, 7]}[mode]
+    expected = {"native": [1, 7], "tej": [1, 3, 5], "merged": [1, 3, 5]}[mode]
     assert out["transmission_number"].tolist() == expected
 
 
-def test_merged_without_tej_path_set_warns_and_raises(dirs, tmp_path, monkeypatch, capsys):
+def test_merged_without_tej_path_set_warns_and_falls_back_to_native(dirs, tmp_path, monkeypatch, capsys):
     native, tej = dirs
     _write(native / NAME, [1, 2], deal_price=10.0, timestamp=CAPTURED)
     _write(tej / NAME, [1, 2, 3], deal_price=20.0, timestamp=None)
     monkeypatch.delenv("DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH")
     monkeypatch.chdir(tmp_path)  # no twseudp_* file at the top level, so "." has no TEJ day
-    with pytest.raises(FileNotFoundError):
-        get_order_book_stocks(DAY, is_twse=True, lazy=True, mode="merged")
+    assert _read("merged").equals(pl.read_parquet(native / NAME))
     assert "DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH not set" in capsys.readouterr().err
 
 

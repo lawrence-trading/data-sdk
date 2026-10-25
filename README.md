@@ -50,9 +50,9 @@ pre_open = (
 
 - `mode="native"`: our own capture in `DATA_SDK_ORDER_BOOK_PARQUET_PATH` (from 2025-05-20).
 - `mode="tej"`: the TEJ conversion in `DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH` (2020-06-01 to 2026-06-30). `timestamp` is null.
-- `mode="merged"` (default): both, joined on `transmission_number`. TEJ rows, plus native rows whose `transmission_number` TEJ lacks, in `transmission_number` order. Both files must exist; a day present in only one source raises `FileNotFoundError`, so use `native` or `tej` for days outside the overlap (before 2025-05-20 or after 2026-06-30).
+- `mode="merged"` (default): the TEJ file when the day has one, otherwise the native file. A day in neither raises `FileNotFoundError`.
 
-Filters on the returned `LazyFrame` still reach both parquet files in `merged` mode.
+One parquet is read in every mode, so filters on the returned `LazyFrame` push down to it.
 
 ```python
 native = get_order_book_stocks("2026-01-02", is_twse=True, mode="native")
@@ -194,7 +194,7 @@ issuer_map = warrant_info.build_issuer_map()      # {warrant_id: issuer_name}
 
 # Order book from parquet (requires DATA_SDK_ORDER_BOOK_PARQUET_PATH)
 df_ob = get_order_book_stocks("2026-01-02", is_twse=True, sid="2330")
-df_ob_day = get_order_book_stocks("2026-01-02", is_twse=True)  # entire day, native + TEJ merged
+df_ob_day = get_order_book_stocks("2026-01-02", is_twse=True)  # entire day, TEJ if present else native
 df_ob_native = get_order_book_stocks("2026-01-02", is_twse=True, mode="native")  # own capture only
 df_ob_tej = get_order_book_stocks("2021-06-29", is_twse=True, mode="tej")        # TEJ only
 df_odd = get_order_book_odd_lots("2026-01-02", is_twse=True, sid="2330")
