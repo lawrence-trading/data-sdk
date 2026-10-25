@@ -1,17 +1,17 @@
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import polars as pl
+import pyarrow.parquet as pq
 
 from .paths import env_path
 
 _ORDER_BOOK_MODES = ("native", "tej", "merged")
 _KEY = "transmission_number"
-# (native path, size, mtime, tej path, size, mtime) -> native transmission numbers TEJ lacks.
-_NATIVE_ONLY_KEYS: Dict[Tuple, List[int]] = {}
+_NATIVE_ONLY_ROWS: Dict[Tuple, pl.DataFrame] = {}  # per (native file, tej file): native rows TEJ lacks
 
 
 def _order_book_base_path() -> Path:
@@ -22,38 +22,33 @@ def _tej_order_book_base_path() -> Path:
     return env_path("DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH")
 
 
-def _native_only_keys(native_path: Path, tej_path: Path) -> List[int]:
-    """Transmission numbers present in the native file and absent from the TEJ file.
+def _native_only_rows(native_path: Path, tej_path: Path) -> pl.DataFrame:
+    """Native rows whose transmission_number is absent from the TEJ file.
 
     Both files are in transmission_number order and TEJ numbers run from 1 with few
-    gaps, so the set is found from the TEJ key column alone (range plus gaps) and one
-    filtered read of the native key column. It is small (tens of rows on most days)
-    and cached per file pair for the life of the process.
+    gaps, so these are the native rows outside TEJ's range or inside one of its gaps.
+    There are at most a few thousand per day; they are read once and cached per file
+    pair (path, size, mtime) for the life of the process.
     """
     ns, ts = os.stat(native_path), os.stat(tej_path)
-    cache_key = (str(native_path), ns.st_size, ns.st_mtime_ns, str(tej_path), ts.st_size, ts.st_mtime_ns)
-    if cache_key not in _NATIVE_ONLY_KEYS:
+    stamp = (str(native_path), ns.st_size, ns.st_mtime_ns, str(tej_path), ts.st_size, ts.st_mtime_ns)
+    if stamp not in _NATIVE_ONLY_ROWS:
         tej_keys = pl.scan_parquet(str(tej_path)).select(_KEY).collect()[_KEY].to_numpy()
-        if len(tej_keys) == 0:
-            cond = pl.lit(True)
-        else:
-            lo, hi = int(tej_keys[0]), int(tej_keys[-1])
-            steps = np.nonzero(np.diff(tej_keys) > 1)[0]
-            gaps = np.concatenate([np.arange(tej_keys[i] + 1, tej_keys[i + 1]) for i in steps]) if len(steps) else None
-            cond = (pl.col(_KEY) < lo) | (pl.col(_KEY) > hi)
-            if gaps is not None:
-                cond = cond | pl.col(_KEY).is_in(pl.Series(gaps, dtype=pl.Int32).implode())
-        _NATIVE_ONLY_KEYS[cache_key] = (
-            pl.scan_parquet(str(native_path)).select(_KEY).filter(cond).collect()[_KEY].to_list()
-        )
-    return _NATIVE_ONLY_KEYS[cache_key]
+        steps = np.nonzero(np.diff(tej_keys) > 1)[0]
+        gaps = np.concatenate([np.arange(tej_keys[i] + 1, tej_keys[i + 1]) for i in steps]) if len(steps) else []
+        missing = (pl.col(_KEY) < int(tej_keys[0])) | (pl.col(_KEY) > int(tej_keys[-1]))
+        if len(gaps):
+            missing = missing | pl.col(_KEY).is_in(pl.Series(gaps, dtype=pl.Int32).implode())
+        _NATIVE_ONLY_ROWS[stamp] = pl.scan_parquet(str(native_path)).filter(missing).collect()
+    return _NATIVE_ONLY_ROWS[stamp]
 
 
 def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
     """Scan one day of regular-lot Format 6 from the native capture, the TEJ conversion, or both.
 
-    merged: TEJ rows plus the native rows whose transmission_number TEJ lacks, in
-    transmission_number order. With only one file present that file is returned; with
+    merged: the TEJ file plus the native rows whose transmission_number TEJ lacks, in
+    transmission_number order (rows with the same transmission_number are the same
+    message in both files). With only one file present that file is returned; with
     neither, the native scan is returned so the FileNotFoundError matches mode="native".
     """
     name = f"{'twseudp' if is_twse else 'otcudp'}_{day_plain}_0825_all.parquet"
@@ -66,18 +61,13 @@ def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
     native_path = _order_book_base_path() / name
     if not native_path.exists():
         return pl.scan_parquet(str(tej_path if tej_path.exists() else native_path))
-    # cumulative_volume is cast to Int64 so both sources always line up.
-    native = pl.scan_parquet(str(native_path)).with_columns(pl.col("cumulative_volume").cast(pl.Int64))
-    if not tej_path.exists():
-        return native
+    if not tej_path.exists() or pq.read_metadata(str(tej_path)).num_rows == 0:
+        return pl.scan_parquet(str(native_path))
     tej = pl.scan_parquet(str(tej_path))
-    keys = _native_only_keys(native_path, tej_path)
-    if not keys:
+    extra = _native_only_rows(native_path, tej_path)
+    if extra.is_empty():
         return tej
-    # The key literal keeps the column's dtype so the native scan prunes row groups on it.
-    # concat + sort beats merge_sorted here by about 2.5x and still lets filters push down.
-    native_only = native.filter(pl.col(_KEY).is_in(pl.Series(keys, dtype=pl.Int32).implode()))
-    return pl.concat([tej, native_only]).sort(_KEY)
+    return pl.concat([tej, extra.lazy()], how="vertical_relaxed").sort(_KEY)
 
 
 def _format_match_time(df_lazy: pl.LazyFrame) -> pl.LazyFrame:
@@ -124,9 +114,9 @@ def get_order_book_stocks(
             on it forces a full scan.
         mode: "native" reads the native capture only (the behaviour before this option).
             "tej" reads the TEJ conversion only (2020-06-01 .. 2026-06-30; timestamp is null).
-            "merged" (default) reads both and joins them on transmission_number: TEJ rows,
-            plus native rows whose transmission_number TEJ lacks, in transmission_number
-            order. Rows with the same transmission_number are taken to be the same message.
+            "merged" (default) reads both: the TEJ file plus the native rows whose
+            transmission_number TEJ lacks, in transmission_number order. Rows with the
+            same transmission_number are taken to be the same message.
 
     Returns:
         pandas DataFrame or polars LazyFrame. match_time is formatted as HH:MM:SS.ffffff

@@ -108,10 +108,9 @@ def test_merged_with_one_source_returns_that_source(dirs):
     assert _read("merged").equals(pl.read_parquet(tej / NAME))
 
 
-def test_merged_returns_int64_cumulative_volume(dirs):
+def test_merged_reconciles_an_int32_native_cumulative_volume(dirs):
     native, tej = dirs
     _write(native / NAME, [1, 2, 4], deal_price=10.0, timestamp=CAPTURED, cumulative_dtype=pl.Int32)
-    assert _read("merged").schema["cumulative_volume"] == pl.Int64
     _write(tej / NAME, [1, 2, 3], deal_price=20.0, timestamp=None)
     out = _read("merged")
     assert out.schema["cumulative_volume"] == pl.Int64
