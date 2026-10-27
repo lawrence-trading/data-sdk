@@ -11,7 +11,12 @@ from .fop_wrapper import get_fop_parquet, get_fop_order_book
 from .finlab_wrapper import FinLabWrapper, FinLabAlignmentError
 from .taifex_wrapper import TaifexWrapper, TaifexResponseError, taifex_prod_id
 from .market_calendar import MarketCalendar, HolidayEntry, UnknownCalendarYear
-from .finmind_calendar import FinMindCalendar, FinMindUnknownCalendarYear
+from .finmind_calendar import (
+    FinMindCalendar,
+    FinMindUnknownCalendarYear,
+    default_market_closures_path,
+    load_market_closures,
+)
 from .disposition import DispositionList, DispositionEntry
 from .cb_info_wrapper import CbInfoWrapper, CB_FACE_VALUE_NT
 from .ssf_decimal_locator import (
@@ -51,6 +56,8 @@ __all__ = [
     "UnknownCalendarYear",
     "FinMindCalendar",
     "FinMindUnknownCalendarYear",
+    "default_market_closures_path",
+    "load_market_closures",
     "DispositionList",
     "DispositionEntry",
     "CbInfoWrapper",

@@ -854,3 +854,13 @@ def test_revalidating_the_year_cache_does_not_undo_a_closure(cache_dir, tmp_path
     assert "2026-10-23" in json.loads((cache_dir / "2026.json").read_text("utf-8"))
     fresh = FinMindCalendar(_refusing_fetcher, holiday_calendar=_twse_2026(), market_closures=closures, now=lambda: now)
     assert fresh.is_trading_day("2026-10-23") is False
+
+
+def test_closure_list_helpers_are_exported_from_the_package(tmp_path, monkeypatch):
+    import data_sdk
+
+    path = tmp_path / "closures.json"
+    path.write_text('{"closures": [{"date": "2026-10-23", "reason": "颱風"}]}', encoding="utf-8")
+    monkeypatch.setenv("DATA_SDK_MARKET_CLOSURES", str(path))
+    assert data_sdk.default_market_closures_path() == str(path)
+    assert data_sdk.load_market_closures(str(path)) == {"2026-10-23": "颱風"}
