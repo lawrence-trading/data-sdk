@@ -762,3 +762,95 @@ def test_a_loser_that_waits_past_the_deadline_falls_back_without_deadlocking(
     # answer, since nothing has been written yet (ISSUES.md I-292: a
     # timed-out wait can only serve what is actually on disk).
     assert loser_result["answer"] is True
+
+
+# ----------------------------------------------------------------------
+# Ad-hoc market closures (a typhoon day FinMind still lists as trading)
+# ----------------------------------------------------------------------
+
+
+def _ranges_fetcher(dates):
+    def fetch(start_date, end_date):
+        return _frame([d for d in dates if d.startswith(start_date[:4])])
+
+    return fetch
+
+
+# 10-23 is listed as trading by "FinMind" here although the market was closed.
+_OCT_2026 = ["2026-10-21", "2026-10-22", "2026-10-23", "2026-10-27", "2026-10-28"]
+
+
+def _write_closures(path, rows):
+    path.write_text(json.dumps({"closures": rows}, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def test_a_declared_closure_is_not_a_trading_day_and_names_its_reason(cache_dir, tmp_path):
+    closures = _write_closures(tmp_path / "c.json", [{"date": "2026-10-23", "reason": "颱風"}])
+    calendar = FinMindCalendar(_ranges_fetcher(_OCT_2026), holiday_calendar=_twse_2026(), market_closures=closures)
+    assert calendar.is_trading_day("2026-10-23") is False
+    assert calendar.closure("2026-10-23") == "臨時休市（颱風）"
+    assert calendar.is_trading_day("2026-10-22") is True
+
+
+def test_previous_and_next_trading_day_step_over_a_declared_closure(cache_dir, tmp_path):
+    closures = _write_closures(tmp_path / "c.json", [{"date": "2026-10-23", "reason": "颱風"}])
+    calendar = FinMindCalendar(_ranges_fetcher(_OCT_2026), holiday_calendar=_twse_2026(), market_closures=closures)
+    assert calendar.previous_trading_day("2026-10-27") == "2026-10-22"
+    assert calendar.next_trading_day("2026-10-22") == "2026-10-27"
+
+
+def test_export_range_marks_the_declared_closure(cache_dir, tmp_path):
+    closures = _write_closures(tmp_path / "c.json", [{"date": "2026-10-23", "reason": "颱風"}])
+    calendar = FinMindCalendar(_ranges_fetcher(_OCT_2026), holiday_calendar=_twse_2026(), market_closures=closures)
+    rows = {r["date"]: r for r in calendar.export_range("2026-10-22", "2026-10-23")}
+    assert rows["2026-10-23"] == {"date": "2026-10-23", "trading_day": False, "closure": "臨時休市（颱風）"}
+    assert rows["2026-10-22"]["trading_day"] is True
+
+
+def test_a_mapping_is_accepted_in_place_of_a_file(cache_dir):
+    calendar = FinMindCalendar(
+        _ranges_fetcher(_OCT_2026), holiday_calendar=_twse_2026(), market_closures={"2026-10-23": ""}
+    )
+    assert calendar.is_trading_day("2026-10-23") is False
+    assert calendar.closure("2026-10-23") == "臨時休市"
+
+
+def test_the_environment_variable_names_the_list(cache_dir, tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_SDK_MARKET_CLOSURES", _write_closures(tmp_path / "e.json", [{"date": "2026-10-23"}]))
+    calendar = FinMindCalendar(_ranges_fetcher(_OCT_2026), holiday_calendar=_twse_2026())
+    assert calendar.is_trading_day("2026-10-23") is False
+
+
+def test_a_missing_list_means_no_closures(cache_dir, tmp_path):
+    calendar = FinMindCalendar(
+        _ranges_fetcher(_OCT_2026), holiday_calendar=_twse_2026(), market_closures=str(tmp_path / "absent.json")
+    )
+    assert calendar.is_trading_day("2026-10-23") is True
+
+
+def test_an_unparsable_list_raises_instead_of_trading_on_a_closed_day(cache_dir, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    calendar = FinMindCalendar(_ranges_fetcher(_OCT_2026), holiday_calendar=_twse_2026(), market_closures=str(bad))
+    with pytest.raises(ValueError):
+        calendar.is_trading_day("2026-10-23")
+
+
+def test_revalidating_the_year_cache_does_not_undo_a_closure(cache_dir, tmp_path):
+    # FinMind keeps listing 10-23 after the cache is revalidated; the list still wins.
+    now = dt.datetime(2026, 10, 27, 12, 0)
+    (cache_dir / "2026.json").write_text(json.dumps(_OCT_2026), encoding="utf-8")
+    old = (now - dt.timedelta(hours=48)).timestamp()
+    os.utime(cache_dir / "2026.json", (old, old))
+    closures = _write_closures(tmp_path / "c.json", [{"date": "2026-10-23", "reason": "颱風"}])
+    fetcher, calls = _counting(_ranges_fetcher(_OCT_2026))
+    calendar = FinMindCalendar(
+        fetcher, holiday_calendar=_twse_2026(), market_closures=closures, now=lambda: now
+    )
+    assert calendar.is_trading_day("2026-10-22") is True  # reads the year, which revalidates it
+    assert calls  # the cache really was revalidated
+    assert calendar.is_trading_day("2026-10-23") is False
+    assert "2026-10-23" in json.loads((cache_dir / "2026.json").read_text("utf-8"))
+    fresh = FinMindCalendar(_refusing_fetcher, holiday_calendar=_twse_2026(), market_closures=closures, now=lambda: now)
+    assert fresh.is_trading_day("2026-10-23") is False

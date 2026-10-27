@@ -100,6 +100,20 @@ pre-correction answer if the winner truly has not written yet, which is the
 best any bounded wait can do. Either way both racing callers end up reading
 the same file after the race settles, so they agree.
 
+Ad-hoc market closures (a typhoon day off announced after FinMind's list was
+cached, or one FinMind never corrects): the owner keeps a tracked JSON list
+``{"closures": [{"date": "YYYY-MM-DD", "reason": "..."}]}`` and this class
+subtracts it from FinMind's trading days, so ``is_trading_day``,
+``closure``, ``next_trading_day``, ``previous_trading_day`` and
+``export_range`` (the ``market-calendar.json`` every page and td-edge read)
+all agree without any consumer handling closures itself. The list is applied
+on read, never written into the year cache, so a revalidation cannot undo
+it. Its location is the ``market_closures`` constructor argument (a path or
+a ``{date: reason}`` mapping), else ``DATA_SDK_MARKET_CLOSURES``, else the
+first ``config/market-closures.json`` found walking up from this file (the
+monorepo checkout). No file means no closures; a file that does not parse
+raises ``ValueError`` rather than silently trading on a closed day.
+
 Callers that need to keep running on an unreachable or unpublished calendar
 apply the weekday rule themselves and say so, exactly as for
 ``MarketCalendar``.
@@ -114,7 +128,8 @@ import logging
 import os
 import tempfile
 import time
-from typing import Callable, Dict, List, Optional, Union
+from pathlib import Path
+from typing import Callable, Dict, List, Mapping, Optional, Union
 
 from .market_calendar import MarketCalendar
 
@@ -128,6 +143,9 @@ DateLike = Union[str, dt.date, dt.datetime]
 # for a closed *weekday*.
 GENERIC_WEEKDAY_CLOSURE = "休市"
 WEEKEND_CLOSURE = "週末"
+AD_HOC_CLOSURE = "臨時休市"
+MARKET_CLOSURES_ENV = "DATA_SDK_MARKET_CLOSURES"
+MARKET_CLOSURES_FILENAME = "market-closures.json"
 
 
 class FinMindUnknownCalendarYear(Exception):
@@ -172,6 +190,41 @@ def _dates_from_frame(frame: object) -> List[str]:
         return [str(d) for d in frame["date"]]
     except (TypeError, KeyError):
         return []
+
+
+def default_market_closures_path() -> Optional[str]:
+    """The closure list a process uses when none is passed in:
+    ``DATA_SDK_MARKET_CLOSURES``, else ``config/market-closures.json`` of the
+    nearest ancestor of this file that has one; ``None`` when neither exists."""
+    configured = os.environ.get(MARKET_CLOSURES_ENV)
+    if configured:
+        return configured
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "config" / MARKET_CLOSURES_FILENAME
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def load_market_closures(path: Optional[Union[str, "os.PathLike[str]"]]) -> Dict[str, str]:
+    """``{YYYY-MM-DD: reason}`` from the closure list at *path*. A missing
+    file (or ``None``) is an empty list; a file that is not the documented
+    shape raises ``ValueError``."""
+    if path is None or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        rows = payload["closures"]
+        if not isinstance(rows, list):
+            raise TypeError("closures is not a list")
+        out: Dict[str, str] = {}
+        for row in rows:
+            day = _iso(_normalize_date(row["date"]))
+            out[day] = str(row.get("reason") or "")
+        return out
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"market closure list {path} is not usable: {exc}") from exc
 
 
 class FinMindCalendar:
@@ -219,11 +272,25 @@ class FinMindCalendar:
         holiday_calendar: Optional[object] = None,
         *,
         now: Optional[Callable[[], dt.datetime]] = None,
+        market_closures: Optional[Union[str, "os.PathLike[str]", Mapping[str, str]]] = None,
     ):
+        self._closures_source = market_closures
+        self._closures: Optional[Dict[str, str]] = None
         self._fetch = trading_dates_fetcher
         self._holiday_calendar = holiday_calendar
         self._year_cache: Dict[int, frozenset] = {}
         self._now = now or dt.datetime.now
+
+    def market_closures(self) -> Dict[str, str]:
+        """The ad-hoc closure list in force, ``{YYYY-MM-DD: reason}`` (read
+        once per instance)."""
+        if self._closures is None:
+            source = self._closures_source
+            if isinstance(source, Mapping):
+                self._closures = {_iso(_normalize_date(k)): str(v or "") for k, v in source.items()}
+            else:
+                self._closures = load_market_closures(source if source is not None else default_market_closures_path())
+        return self._closures
 
     # ------------------------------------------------------------------
     # Lazy collaborators
@@ -548,9 +615,12 @@ class FinMindCalendar:
     # ------------------------------------------------------------------
 
     def is_trading_day(self, date: DateLike) -> bool:
-        """True if FinMind lists *date* as a Taiwan trading day. This is the
-        only verdict that matters -- TWSE's calendar is never asked."""
+        """True if FinMind lists *date* as a Taiwan trading day and the
+        ad-hoc closure list does not declare it closed. This is the only
+        verdict that matters -- TWSE's calendar is never asked."""
         d = _normalize_date(date)
+        if _iso(d) in self.market_closures():
+            return False
         return _iso(d) in self._trading_dates_of_year(d.year)
 
     def closure(self, date: DateLike) -> Optional[str]:
@@ -566,6 +636,9 @@ class FinMindCalendar:
         d = _normalize_date(date)
         if self.is_trading_day(d):
             return None
+        reason = self.market_closures().get(_iso(d))
+        if reason is not None:
+            return f"{AD_HOC_CLOSURE}（{reason}）" if reason else AD_HOC_CLOSURE
         if d.weekday() >= 5:
             return WEEKEND_CLOSURE
         return self._weekday_label(d)
