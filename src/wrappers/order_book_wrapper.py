@@ -6,9 +6,37 @@ import polars as pl
 
 from .paths import env_path
 
+_ORDER_BOOK_MODES = ("native", "tej", "merged")
+
 
 def _order_book_base_path() -> Path:
     return env_path("DATA_SDK_ORDER_BOOK_PARQUET_PATH")
+
+
+def _tej_order_book_base_path() -> Path:
+    return env_path("DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH")
+
+
+def _stocks_lazy(day_plain: str, is_twse: bool, mode: str) -> pl.LazyFrame:
+    """Scan one day of regular-lot Format 6; FileNotFoundError at the call when the file is missing."""
+    name = f"{'twseudp' if is_twse else 'otcudp'}_{day_plain}_0825_all.parquet"
+    tej_path, native_path = _tej_order_book_base_path() / name, _order_book_base_path() / name
+
+    if mode == "tej":
+        if not tej_path.exists():
+            raise FileNotFoundError(tej_path)
+        return pl.scan_parquet(str(tej_path))
+
+    if mode == "native":
+        if not native_path.exists():
+            raise FileNotFoundError(native_path)
+        return pl.scan_parquet(str(native_path))
+
+    if tej_path.exists():
+        return pl.scan_parquet(str(tej_path))
+    if native_path.exists():
+        return pl.scan_parquet(str(native_path))
+    raise FileNotFoundError(f"{tej_path}, {native_path}")
 
 
 def _format_match_time(df_lazy: pl.LazyFrame) -> pl.LazyFrame:
@@ -35,11 +63,14 @@ def get_order_book_stocks(
     sid: Optional[str] = None,
     lazy: bool = False,
     format_match_time: bool = True,
+    mode: str = "merged",
 ) -> Union[pd.DataFrame, pl.LazyFrame]:
     """Load order book (regular lots) from parquet for a given day, optionally filtered by stock.
 
-    Parquet path is taken from DATA_SDK_ORDER_BOOK_PARQUET_PATH (e.g. /mnt/nfs/backup/parquets).
-    Files are named twseudp_YYYYMMDD_0825_all.parquet (TWSE) or otcudp_YYYYMMDD_0825_all.parquet (OTC).
+    Native parquet path is taken from DATA_SDK_ORDER_BOOK_PARQUET_PATH (e.g. /mnt/nfs/backup/parquets);
+    TEJ parquet path from DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH (e.g. /mnt/nfs/backup/tej_parquets).
+    Files are named twseudp_YYYYMMDD_0825_all.parquet (TWSE) or otcudp_YYYYMMDD_0825_all.parquet (OTC)
+    in both directories, with the same 36 columns.
 
     Args:
         day: Trading day, e.g. "2026-02-11" or "20260211".
@@ -50,17 +81,18 @@ def get_order_book_stocks(
             keep the on-disk Int64 (HHMMSSffffff), which a filter can push down to the
             parquet row-group statistics; the formatted column is computed, so a predicate
             on it forces a full scan.
+        mode: "native" reads the native capture only (the behaviour before this option).
+            "tej" reads the TEJ conversion only (2020-06-01 .. 2026-06-30; timestamp is null).
+            "merged" (default) reads the TEJ file when the day has one, otherwise the
+            native file. A missing file raises FileNotFoundError at the call in every mode.
 
     Returns:
         pandas DataFrame or polars LazyFrame. match_time is formatted as HH:MM:SS.ffffff
         unless format_match_time is False, in which case it stays the raw Int64.
     """
-    base = _order_book_base_path()
-    day_plain = day.replace("-", "")
-    prefix = "twseudp" if is_twse else "otcudp"
-    path = base / f"{prefix}_{day_plain}_0825_all.parquet"
-
-    df_lazy = pl.scan_parquet(str(path))
+    if mode not in _ORDER_BOOK_MODES:
+        raise ValueError(f"mode must be one of {_ORDER_BOOK_MODES}, got {mode!r}")
+    df_lazy = _stocks_lazy(day.replace("-", ""), is_twse, mode)
     if sid is not None:
         df_lazy = df_lazy.filter(pl.col("stock_code") == sid)
     if format_match_time:
