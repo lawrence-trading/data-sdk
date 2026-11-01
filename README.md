@@ -231,6 +231,8 @@ dividends = FinLabWrapper().get_dividend_announcements(since="2026-10-12")
 
 # TAIFEX public endpoints, cached under the day each payload carries. Prices
 # come back as the published strings; prod_id is derived for the i024 join.
+# DailyMarketReportFut answers either its JSON array or a UTF-8 CSV with Chinese
+# headers; both read as the same rows (the headers map to the JSON keys).
 taifex = TaifexWrapper()
 report = taifex.get_daily_market_report_fut()           # TradingSession == '一般'
 adjusted = taifex.get_ssf_adjusted_info()                # 調整型 stock futures

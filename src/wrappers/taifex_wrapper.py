@@ -2,7 +2,12 @@
 
     DailyMarketReportFut   https://openapi.taifex.com.tw/v1/DailyMarketReportFut
                            settlement price, open interest, volume per contract
-                           month; the ``一般`` session only
+                           month; the ``一般`` session only. It answers either the
+                           JSON array or a UTF-8 CSV (BOM, Chinese headers, HTTP
+                           200 ``application/octet-stream``), whatever the
+                           ``Accept`` header says; both read as the same rows
+                           (the CSV's headers map to the JSON keys, every cell
+                           stays the published string)
     DailyMarketReportOpt   https://openapi.taifex.com.tw/v1/DailyMarketReportOpt
                            the options counterpart (confirmed 2026-10-08 by a
                            live GET: HTTP 200, JSON rows with StrikePrice/
@@ -16,7 +21,8 @@
 
 No credential is involved. Each endpoint serves only its latest publication,
 so a fetch is stored under the day the payload itself carries
-(``DATA_SDK_TAIFEX_CACHE_PATH``, default ``/mnt/nfs/backup/taifex_cache``)
+(``DATA_SDK_TAIFEX_CACHE_PATH``, default ``/mnt/nfs/backup/taifex_cache``;
+the stored file is the rows as JSON whichever form the endpoint answered)
 and a read for a specific day is answered from that store or not at all.
 """
 
@@ -26,7 +32,7 @@ import io
 import json
 import os
 import tempfile
-from typing import Callable, Optional, Tuple
+from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -46,6 +52,40 @@ _REPORT_CONTRACT_ALIASES = {
     "TF": "FXF",   # 金融期貨
 }
 _MONTH_CODES = "ABCDEFGHIJKL"
+
+# DailyMarketReportFut's CSV form: its Chinese header -> the key the JSON form
+# carries (the order is the JSON's). A column the table does not list keeps its
+# published header as the key.
+_FUT_CSV_COLUMNS = {
+    "日期": "Date",
+    "契約代號": "Contract",
+    "到期月份(週別)": "ContractMonth(Week)",
+    "開盤價": "Open",
+    "最高價": "High",
+    "最低價": "Low",
+    "最後成交價": "Last",
+    "漲跌價": "Change",
+    "漲跌%": "%",
+    "合計成交量": "Volume",
+    "結算價": "SettlementPrice",
+    "未沖銷契約數": "OpenInterest",
+    "最後最佳買價": "BestBid",
+    "最後最佳賣價": "BestAsk",
+    "歷史最高價": "HistoricalHigh",
+    "歷史最低價": "HistoricalLow",
+    "是否因訊息面暫停交易": "TradingHalt",
+    "交易時段": "TradingSession",
+    "價差對單式委託成交量": "Volume(ExecutionsAmongSpreadOrderAndSingleOrderOnly)",
+}
+# The keys a CSV must still carry for the reader to answer: the day (cache key),
+# the session filter, the PROD-ID inputs and the settlement price.
+_FUT_CSV_REQUIRED = ("Date", "Contract", "ContractMonth(Week)", "SettlementPrice", "TradingSession")
+
+# Endpoints whose CSV form the reader knows: URL -> (header map, required keys).
+# An endpoint not listed here is JSON only, and a CSV from it is refused.
+_CSV_FORMS = {
+    DAILY_MARKET_REPORT_FUT_URL: (_FUT_CSV_COLUMNS, _FUT_CSV_REQUIRED),
+}
 
 
 def _normalize_day(day) -> str:
@@ -113,19 +153,69 @@ class TaifexWrapper:
 
     @classmethod
     def _http_json(cls, url: str) -> list:
+        """The rows of an OpenAPI endpoint: its JSON array, or, for an endpoint
+        with a known CSV form, that CSV mapped to the same rows."""
         import requests
 
         response = requests.get(url, timeout=REQUEST_TIMEOUT_S)
         response.raise_for_status()
         content_type = response.headers.get("Content-Type", "<no Content-Type header>")
         try:
-            return json.loads(response.content.decode("utf-8", errors="replace"))
+            return json.loads(response.content.decode("utf-8-sig", errors="replace"))
         except (UnicodeDecodeError, ValueError) as exc:
             preview = response.content[:200]
-            raise TaifexResponseError(
-                f"TAIFEX endpoint {url} did not return JSON "
-                f"(content-type={content_type!r}, first bytes={preview!r}): {exc}"
-            ) from exc
+            form = _CSV_FORMS.get(url)
+            if form is None:
+                raise TaifexResponseError(
+                    f"TAIFEX endpoint {url} did not return JSON "
+                    f"(content-type={content_type!r}, first bytes={preview!r}): {exc}"
+                ) from exc
+            try:
+                return cls.parse_openapi_csv(response.content, *form)
+            except (UnicodeDecodeError, ValueError, csv.Error) as csv_exc:
+                raise TaifexResponseError(
+                    f"TAIFEX endpoint {url} returned neither JSON nor its CSV form "
+                    f"(content-type={content_type!r}, first bytes={preview!r}): {csv_exc}"
+                ) from csv_exc
+
+    @staticmethod
+    def parse_openapi_csv(payload: bytes, columns: Mapping[str, str], required: Sequence[str] = ()) -> list:
+        """The rows of an OpenAPI endpoint's CSV form, as the dicts its JSON form carries.
+
+        ``payload`` is UTF-8 (a BOM is dropped) and line 1 the Chinese header.
+        ``columns`` maps a header to the JSON key; a header it does not list keeps
+        its published text as the key. Every cell is the published string, never
+        stripped or converted. ``required`` are the JSON keys the CSV must carry;
+        a missing one, a repeated key or a row whose field count differs from the
+        header's (a row may carry extra empty cells at its end) raises
+        ``TaifexResponseError`` naming the problem, so a shifted column never
+        reads as a price.
+        """
+        reader = csv.reader(io.StringIO(payload.decode("utf-8-sig"), newline=""))
+        header = [cell.strip() for cell in next(reader, [])]
+        while header and header[-1] == "":
+            header.pop()
+        keys = [columns.get(cell, cell) for cell in header]
+        if not keys:
+            raise TaifexResponseError("the CSV has no header line")
+        repeated = sorted({key for key in keys if keys.count(key) > 1})
+        if repeated:
+            raise TaifexResponseError(f"the CSV header repeats {repeated}")
+        missing = [key for key in required if key not in keys]
+        if missing:
+            raise TaifexResponseError(f"the CSV header {str(header)[:200]} lacks {missing}")
+        rows = []
+        for cells in reader:
+            if not any(cell.strip() for cell in cells):
+                continue
+            if len(cells) > len(keys) and not any(cells[len(keys):]):
+                cells = cells[: len(keys)]
+            if len(cells) != len(keys):
+                raise TaifexResponseError(
+                    f"CSV line {reader.line_num} has {len(cells)} fields, its header {len(keys)}"
+                )
+            rows.append(dict(zip(keys, cells)))
+        return rows
 
     # ------------------------------------------------------------------
     # Cache
@@ -249,7 +339,9 @@ class TaifexWrapper:
         ``TradingHalt``, ``TradingSession``, ...) as strings, exactly as
         published (``-`` and ``NULL`` included), plus ``prod_id`` from
         ``taifex_prod_id`` (None for calendar spreads). Prices stay strings
-        so no consumer inherits a float on a money path by accident.
+        so no consumer inherits a float on a money path by accident. The
+        columns are the same whether the endpoint answered its JSON or its
+        CSV form.
 
         ``day``: ``YYYYMMDD`` / ``YYYY-MM-DD`` / date. None returns the
         endpoint's current day. A day that is neither cached nor live raises
