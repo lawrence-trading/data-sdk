@@ -44,6 +44,9 @@ SSF_TRADE_PAUSE_URL = "https://www.taifex.com.tw/cht/4/sSFTradePauseInfoDown"
 
 REQUEST_TIMEOUT_S = 30
 
+# How many characters of an unreadable CSV answer the error message quotes.
+_CSV_PREVIEW_CHARS = 80
+
 # Contract codes the daily report spells differently from the PROD-ID root.
 _REPORT_CONTRACT_ALIASES = {
     "TX": "TXF",   # 臺股期貨
@@ -117,13 +120,15 @@ def taifex_prod_id(contract: str, contract_month: str) -> Optional[str]:
 
 
 class TaifexResponseError(ValueError):
-    """An OpenAPI endpoint answered with a body ``json.loads`` cannot parse --
-    an error page, an empty body, or anything else that is not the endpoint's
-    normal JSON array. Carries the URL, the response's Content-Type and a
-    preview of its first bytes so the caller (``refresh_ssf_reference.py``'s
-    ``errors`` dict, surfaced to ``GET /api/ssf/health``) names what actually
-    came back instead of just "Expecting value: line 1 column 1" (ISSUES.md
-    I-98)."""
+    """An OpenAPI endpoint answered with a body the reader cannot use -- an
+    error page, an empty body, or anything else that is neither the endpoint's
+    normal JSON array nor, for an endpoint with a known CSV form, a CSV that
+    form can read (a required column missing, a key repeated, a row whose field
+    count differs from the header's, a body that is not UTF-8). Carries the
+    URL, the response's Content-Type and a preview of the beginning of the body
+    so the caller (``refresh_ssf_reference.py``'s ``errors`` dict, surfaced to
+    ``GET /api/ssf/health``) names what actually came back instead of just
+    "Expecting value: line 1 column 1" (ISSUES.md I-98)."""
 
 
 class TaifexWrapper:
@@ -163,19 +168,22 @@ class TaifexWrapper:
         try:
             return json.loads(response.content.decode("utf-8-sig", errors="replace"))
         except (UnicodeDecodeError, ValueError) as exc:
-            preview = response.content[:200]
             form = _CSV_FORMS.get(url)
             if form is None:
                 raise TaifexResponseError(
                     f"TAIFEX endpoint {url} did not return JSON "
-                    f"(content-type={content_type!r}, first bytes={preview!r}): {exc}"
+                    f"(content-type={content_type!r}, first bytes={response.content[:200]!r}): {exc}"
                 ) from exc
             try:
                 return cls.parse_openapi_csv(response.content, *form)
             except (UnicodeDecodeError, ValueError, csv.Error) as csv_exc:
+                # The beginning as characters: a bytes repr writes every byte of a
+                # Chinese character as a four-character escape. A UTF-8 character
+                # is at most 4 bytes, so this slice always holds the characters shown.
+                beginning = response.content[: 4 * _CSV_PREVIEW_CHARS].decode("utf-8-sig", errors="replace")
                 raise TaifexResponseError(
                     f"TAIFEX endpoint {url} returned neither JSON nor its CSV form "
-                    f"(content-type={content_type!r}, first bytes={preview!r}): {csv_exc}"
+                    f"(content-type={content_type!r}, first characters={beginning[:_CSV_PREVIEW_CHARS]!r}): {csv_exc}"
                 ) from csv_exc
 
     @staticmethod

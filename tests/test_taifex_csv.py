@@ -182,6 +182,18 @@ def test_a_csv_that_lost_a_required_column_is_refused_naming_it(serve):
     assert "neither JSON nor its CSV form" in str(exc_info.value) and FUT in str(exc_info.value)
 
 
+def test_a_refused_csv_quotes_its_beginning_as_characters_not_as_escaped_bytes(serve):
+    body = RAW.replace("結算價".encode("utf-8"), "清算價".encode("utf-8"), 1)
+    serve(body)
+
+    with pytest.raises(TaifexResponseError) as exc_info:
+        TaifexWrapper._http_json(FUT)
+
+    message = str(exc_info.value)
+    assert f"first characters={body.decode('utf-8-sig')[:80]!r}" in message  # 80 characters, the BOM not among them
+    assert "\\x" not in message and len(message) < 600
+
+
 def test_a_row_with_a_missing_field_is_refused_not_read_with_shifted_columns(serve):
     lines = RAW.split(b"\r\n")
     lines[2] = lines[2].replace(b",-0.17%", b"", 1)  # one field fewer on line 3
