@@ -2,7 +2,7 @@
 
 ``fixtures/taifex/daily_market_report_fut_20261030.csv`` is the answer of ``DailyMarketReportFut`` recorded in
 full on 2026-11-01 (``fixtures/taifex/NOTE.md``): a UTF-8 CSV with a BOM and Chinese headers, 2,150 rows of the
-trading day 2026-10-30, where the endpoint had answered a JSON array before. The wrapper must hand its callers the
+trading day 2026-10-30. The endpoint answers either that CSV or a JSON array. The wrapper must hand its callers the
 same rows either way, every cell the published string, and keep the day handling it has: a fetch is stored under the
 day the payload carries and a read for a specific day answers from that store or not at all.
 """

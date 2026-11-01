@@ -191,13 +191,18 @@ class TaifexWrapper:
         """The rows of an OpenAPI endpoint's CSV form, as the dicts its JSON form carries.
 
         ``payload`` is UTF-8 (a BOM is dropped) and line 1 the Chinese header.
-        ``columns`` maps a header to the JSON key; a header it does not list keeps
-        its published text as the key. Every cell is the published string, never
-        stripped or converted. ``required`` are the JSON keys the CSV must carry;
-        a missing one, a repeated key or a row whose field count differs from the
-        header's (a row may carry extra empty cells at its end) raises
-        ``TaifexResponseError`` naming the problem, so a shifted column never
-        reads as a price.
+        ``columns`` maps a header to the JSON key (the header's cells are stripped
+        first); a header it does not list keeps its published text as the key.
+        Every data cell is the published string, never stripped or converted.
+        ``required`` are the JSON keys the CSV must carry; a missing one, a
+        repeated key or a row whose field count differs from the header's (a row
+        may carry extra empty cells at its end) raises ``TaifexResponseError``
+        naming the problem, so a shifted column never reads as a price.
+
+        The CSV has no row count or checksum: a body cut short is refused only
+        when the cut splits a character or leaves a row with too few fields; one
+        cut between two rows, or inside a row's last cell, reads as a shorter
+        table.
         """
         reader = csv.reader(io.StringIO(payload.decode("utf-8-sig"), newline=""))
         header = [cell.strip() for cell in next(reader, [])]
