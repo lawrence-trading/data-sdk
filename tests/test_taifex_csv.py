@@ -191,6 +191,38 @@ def test_a_row_with_a_missing_field_is_refused_not_read_with_shifted_columns(ser
         TaifexWrapper._http_json(FUT)
 
 
+def test_a_row_with_a_filled_extra_field_is_refused_not_read_with_a_dropped_cell(serve):
+    lines = RAW.split(b"\r\n")
+    lines[2] = lines[2] + b",45300"  # one field more on line 3, and not an empty one
+    serve(b"\r\n".join(lines))
+
+    with pytest.raises(TaifexResponseError, match=r"line 3 has 20 fields, its header 19"):
+        TaifexWrapper._http_json(FUT)
+
+
+def test_a_cell_beyond_the_csv_field_size_limit_is_refused_as_a_taifex_response_error(serve):
+    header = RAW.split(b"\r\n")[0]
+    serve(header + b"\r\n20261030,TX," + b"9" * (csv.field_size_limit() + 1) + b"\r\n")
+
+    with pytest.raises(TaifexResponseError, match="neither JSON nor its CSV form") as exc_info:
+        TaifexWrapper._http_json(FUT)
+    assert "field larger than field limit" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("payload", [b"", "﻿".encode("utf-8"), b"\r\n"], ids=["empty", "bom only", "blank line"])
+def test_a_payload_without_a_header_line_is_refused(payload):
+    with pytest.raises(TaifexResponseError, match="no header line"):
+        TaifexWrapper.parse_openapi_csv(payload, {})
+
+
+def test_an_empty_answer_is_refused_naming_the_endpoint(serve):
+    serve(b"", "text/plain")
+
+    with pytest.raises(TaifexResponseError, match="no header line") as exc_info:
+        TaifexWrapper._http_json(FUT)
+    assert FUT in str(exc_info.value) and "text/plain" in str(exc_info.value)
+
+
 def test_a_csv_that_is_not_utf8_is_refused(serve):
     serve(RAW.decode("utf-8-sig").encode("cp950"))
 
@@ -206,6 +238,13 @@ def test_trailing_empty_cells_blank_lines_and_a_missing_last_line_end_are_tolera
         {"Date": "20261030", "Contract": "TX", "新欄位": "a b "},  # an unknown header keeps its text; cells are not stripped
         {"Date": "20261030", "Contract": "MTX", "新欄位": ""},
     ]
+
+
+def test_a_header_cell_with_spaces_around_it_still_maps_to_its_key():
+    payload = " 日期 ,契約代號\t, 新欄位 ,\r\n20261030,TX, a b ,\r\n".encode("utf-8")
+    rows = TaifexWrapper.parse_openapi_csv(payload, {"日期": "Date", "契約代號": "Contract"}, ("Date", "Contract"))
+
+    assert rows == [{"Date": "20261030", "Contract": "TX", "新欄位": " a b "}]  # the header is stripped, the cells are not
 
 
 def test_a_repeated_key_is_refused():
