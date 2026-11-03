@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import DEFAULT_CACHE_PATH, cache_directory as cache_dir
-from .build_basic_info import WARRANT_KEY
+from .build_basic_info import WARRANT_KEY, add_warrant_key
 
 RAW_WARRANT_KEY = ['warrant_id', 'exercise_end_date']
 
@@ -229,11 +229,48 @@ def check_curated_layer(cache_directory: Path) -> None:
            float(expiry_matches.mean()) >= 0.98,
            f'{expiry_matches.mean():.2%}')
 
+    # The underlying is a state column closed against the dimension table by
+    # build_history, so the final row must name the same code; a miss means a
+    # conversion the chain recorded but the dimension table does not have.
+    current_underlying = history.groupby(WARRANT_KEY, sort=False).tail(1).merge(
+        dimension[WARRANT_KEY + ['target_stock_id']], on=WARRANT_KEY, suffixes=('', '_dim')
+    )
+    underlying_closes = current_underlying['target_stock_id'].fillna('') == current_underlying['target_stock_id_dim'].fillna('')
+    report('current underlying == dim target_stock_id',
+           bool(underlying_closes.all()),
+           f'{int((~underlying_closes).sum()):,} warrants differ')
+    underlying_count = history.groupby(WARRANT_KEY)['target_stock_id'].nunique()
+    print(f'  warrants whose underlying changed within their history: {int((underlying_count > 1).sum()):,}'
+          f' ({int((history["event_type"] == "target_change").sum()):,} dated only by closure)')
+
     corrupted_list_dates = dimension['list_date'] > dimension['last_trade_date']
     report('dim list_date <= last_trade_date (MOPS 2023-12-26 bug repaired)',
            not bool(corrupted_list_dates.any()),
            f'{int(corrupted_list_dates.sum()):,} violations;'
            f' {int(dimension["list_date"].isna().sum()):,} unknown (null)')
+
+    # The underlying moves on a share conversion or merger, and MOPS updates it
+    # on every live warrant; the dimension table must follow (build_basic_info
+    # refreshes it from the snapshot), or every warrant on the new code is
+    # invisible to a join on the underlying's quotes.
+    try:
+        snapshot = add_warrant_key(load_table(cache_directory, 'warrant_active_snapshot'), 'warrant_id', 'warrant_name')
+    except FileNotFoundError:
+        print('  [SKIP] dim underlying == snapshot: no warrant_active_snapshot')
+        return
+    snapshot = snapshot.drop_duplicates(subset=WARRANT_KEY, keep='last')
+    live = dimension.merge(
+        snapshot[WARRANT_KEY + ['target_stock_id', 'target_name']],
+        on=WARRANT_KEY,
+        suffixes=('', '_snapshot'),
+    )
+    underlying_matches = (
+        (live['target_stock_id'].fillna('') == live['target_stock_id_snapshot'].fillna(''))
+        & (live['target_name'].fillna('') == live['target_name_snapshot'].fillna(''))
+    )
+    report('dim underlying == snapshot underlying (live warrants)',
+           bool(underlying_matches.all()),
+           f'{int((~underlying_matches).sum()):,} of {len(live):,} differ')
 
 
 def main() -> None:

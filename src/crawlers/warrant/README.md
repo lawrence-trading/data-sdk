@@ -87,16 +87,16 @@ effective_date, sequence)`.
 | `floor` | float | 966,195 | 下限價。同上族群。展延型的**上限**價被 MOPS 填在這欄，是它自己的欄位語意問題，不是解析錯誤 |
 | `exercise_end_date` | datetime | 0 | 到期日／履約截止日（台灣權證兩者同日，歐式權證實測 100% 相等）。提前到期時會變動 |
 | `last_trade_date` | datetime | 72 | 最後交易日，隨到期日一起變動。72 列空值是 2003-04 MOPS 本身空白 |
+| `target_stock_id` | str | 0 | 標的代號，**隨時間變**：標的股份轉換／合併後（中光電 5371 → 中光電投控 3718，2026-09-03）換股日前是舊代號、之後是新代號。來源同履約價：TEJ 列帶該事件當時的 `標的代號`（換股那筆 `重設` 列就換成新代號），seed 之後 MOPS 的調整／重設列帶 MOPS 當時列的標的（換股當天 MOPS 會對每檔活著的權證發一筆 t95sb02），最後與 dim 表對不上的用 `target_change` 列收尾（見 Known limits）。2026-11-03 build 有 128 檔權證在自己的歷史裡換過標的。指數權證是 `IX0001`，ETF 是 `00xxx` |
+| `target_name` | str | 0 | 標的名稱，由每列的 `target_stock_id` 查 MOPS 的名稱而來（TEJ 的寫法不同：`國巨*`／`國巨`），只改名不改代號的（世紀風電 → 世紀能源）全列都是新名 |
 | **來源欄** | | | |
-| `event_type` | str | 0 | `issuance` 646,562 · `change` 314,771 · `adjustment` 2,883 · `expiry_change` 2,869 · `snapshot_diff` 437 · `reset` 94 |
-| `source` | str | 0 | `tej` 717,018 · `dim_synthesised` 244,315 · `mops_strike` 2,977 · `mops_announcement` 2,869 · `mops_snapshot` 437 |
-| `source_rank` | int | 0 | 兩個來源描述同一時點時的優先序：1 TEJ、2 公告、3 MOPS 事件、4 合成、5 snapshot diff |
+| `event_type` | str | 0 | `issuance` 646,562 · `change` 314,771 · `adjustment` 2,883 · `expiry_change` 2,869 · `snapshot_diff` 437 · `reset` 94 · `target_change`（見下） |
+| `source` | str | 0 | `tej` 717,018 · `dim_synthesised` 244,315 · `mops_strike` 2,977 · `mops_announcement` 2,869 · `mops_snapshot` 437 · `dim_closure`（只帶標的） |
+| `source_rank` | int | 0 | 兩個來源描述同一時點時的優先序：1 TEJ、2 公告、3 MOPS 事件、4 合成、5 snapshot diff / dim closure |
 | `is_current` | bool | 0 | 是否為該檔最後一列。每檔恰好一列為 True |
 | **靜態欄（同一檔每列相同）** | | | |
 | `issuer` | str | 0 | 發行商，如 `凱基` |
 | `type` | str | 20 | `認購` 834,770 · `認售` 132,826。20 列空值是 2003-04 MOPS 本身空白 |
-| `target_stock_id` | str | 0 | 標的代號。指數權證是 `IX0001`，ETF 是 `00xxx` |
-| `target_name` | str | 0 | 標的名稱 |
 | `market` | str | 0 | `twse` 739,940 · `otc` 227,676 |
 | `list_date` | datetime | 2,476 | 上市日。MOPS 壞成 2023-12-26 的 51,537 檔（幾乎全是 2011-2019 到期的上櫃權證）：19,932 用 TEJ 修、48,647 用 FinMind 修、2,476 兩邊都沒有 → 空值。來源標在 dim 表的 `list_date_source` |
 | `exercise_start_date` | datetime | 2,072 | 履約開始日。美式等於 `list_date`，歐式等於 `exercise_end_date`。空值同上 |
@@ -196,6 +196,26 @@ identifier both vendors share.
   a reset on a listing still to come) is in the table but not current until
   the next nightly build. For "today" at query time use
   `get_warrant_history(as_of=...)`, which is evaluated when called.
+- **An underlying change is dated only where an event source saw it.**
+  `target_stock_id` is a state column sourced like the strike. Each TEJ row
+  carries the underlying as of that event, so a conversion inside the TEJ
+  window is dated by its `重設` row (勝麗 → 同欣電 2020-06-19, 奇力新 → 國巨
+  2022-01-05, 京城銀 → 永豐金 2025-10-01, 三商壽 → 玉山金 2026-09-01). After
+  the seed, MOPS's `t95sb02`/`t95sb03` rows carry the underlying MOPS listed
+  when they were crawled, and a conversion posts a row for every live warrant
+  on its effective day (中光電 → 中光電投控 3718 on 2026-09-03, 精星 → 精成科
+  6191 on 10-01). MOPS rows *before* the seed are not used for this because
+  their underlying is as of the crawl, not the event: the backfill shows 3718
+  on a 2026-06-17 ex-dividend row. Where the chain still ends on another code
+  than `warrant_basic_info` (which holds MOPS's latest record: current for a
+  live warrant, the one it expired on otherwise) -- a warrant outside TEJ
+  whose conversion row MOPS never posted -- a `target_change` row
+  (`source = dim_closure`) closes it, dated at expiry for an expired warrant
+  and at the snapshot crawl for a live one: no later than it happened, never
+  earlier. The 2026-11-03 build needed none. `validate.py` checks the final
+  row closes against the dimension table and the dimension table against the
+  snapshot. `target_name` is looked up from the code in MOPS's spelling, so a
+  rename without a code change (世紀風電 → 世紀能源) is current-only.
 - **Publisher timing**: MOPS and the exchange OpenAPI do not post an
   adjustment at the same moment -- either can be a day ahead of the other
   around an ex-dividend date. `verify_openapi.py` fails on any mismatch and

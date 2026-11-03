@@ -59,6 +59,19 @@ from .build_basic_info import WARRANT_KEY, add_warrant_key, load_raw_table
 
 # Terms carried on every row. Missing values are forward-filled within a
 # warrant, so a strike-only event keeps the expiry it inherited and vice versa.
+#
+# The underlying is a state too: a share conversion or merger moves every
+# live warrant on it to the new code (中光電 5371 -> 中光電投控 3718 on
+# 2026-09-03), and a join to the underlying's quotes before that day needs
+# the old code. It follows the same sourcing as the strike: each TEJ row
+# carries the underlying as of that event (勝麗 6238 becomes 同欣電 6271 on
+# the 2020-06-19 row), MOPS's t95sb02/t95sb03 rows after the seed carry the
+# underlying as MOPS listed it when crawled (a conversion posts a row for
+# every live warrant on its effective day), and whatever the chain then
+# still disagrees with the dimension table on is closed by a
+# ``target_change`` row (see :func:`events_from_target_closure`).
+# ``target_name`` is not forward-filled but derived from the code on every
+# row, because TEJ and MOPS spell names differently (國巨* / 國巨).
 STATE_COLUMNS = [
     'strike',
     'ratio',
@@ -66,12 +79,11 @@ STATE_COLUMNS = [
     'floor',
     'exercise_end_date',
     'last_trade_date',
+    'target_stock_id',
 ]
 STATIC_COLUMNS = [
     'issuer',
     'type',
-    'target_stock_id',
-    'target_name',
     'market',
     'list_date',
     'exercise_start_date',
@@ -79,6 +91,7 @@ STATIC_COLUMNS = [
     'is_american',
 ]
 EVENT_COLUMNS = WARRANT_KEY + ['effective_date', 'sequence'] + STATE_COLUMNS + [
+    'target_name',
     'event_type',
     'source',
     'source_rank',
@@ -87,6 +100,33 @@ EVENT_COLUMNS = WARRANT_KEY + ['effective_date', 'sequence'] + STATE_COLUMNS + [
 
 def empty_events() -> pd.DataFrame:
     return pd.DataFrame(columns=EVENT_COLUMNS)
+
+
+def tej_underlying_codes(tej: pd.DataFrame, dim_warrant: pd.DataFrame) -> pd.Series:
+    """TEJ's ``標的代號`` in MOPS's spelling.
+
+    A stock or ETF is ``2330.TW`` / ``6488.TWO``: the exchange suffix goes
+    and the code is MOPS's. An index is a TEJ token (``Y9999`` 加權指數,
+    ``M2300`` 電子類, ``HSI.HK``) where MOPS has its own (``IX0001``,
+    ``IX0027``, ``HSI``), so each token is mapped to the MOPS code that most
+    of the warrants carrying it have in the dimension table. Only tokens
+    are mapped that way: a stock code is kept as TEJ states it, because the
+    cases where it differs from the dimension table are exactly the
+    conversions this column exists to record.
+    """
+    codes = tej['標的代號'].str.replace(r'\.TWO?$', '', regex=True)
+    is_token = ~codes.str.fullmatch(r'\d{4,6}', na=False)
+    if not is_token.any():
+        return codes
+    dim_codes = dim_warrant[WARRANT_KEY + ['target_stock_id']].rename(columns={'target_stock_id': 'dim_code'})
+    tokens = (
+        tej.loc[is_token, WARRANT_KEY].assign(token=codes[is_token])
+        .merge(dim_codes, on=WARRANT_KEY, how='left')
+        .dropna(subset=['dim_code'])
+    )
+    token_map = tokens.groupby('token')['dim_code'].agg(lambda names: names.mode().iloc[0])
+    print(f'TEJ index tokens mapped to MOPS codes: {token_map.to_dict()}')
+    return codes.where(~is_token, codes.map(token_map).fillna(codes))
 
 
 def events_from_tej(tej_adjustment_path: Path, dim_warrant: pd.DataFrame) -> pd.DataFrame:
@@ -103,10 +143,11 @@ def events_from_tej(tej_adjustment_path: Path, dim_warrant: pd.DataFrame) -> pd.
     """
     tej = pd.read_parquet(
         tej_adjustment_path,
-        columns=['權證代號', '權證簡稱', '年月日', '序號', '事件說明', '履約價(元)', '行使比例'],
+        columns=['權證代號', '權證簡稱', '年月日', '序號', '事件說明', '履約價(元)', '行使比例', '標的代號', '標的簡稱'],
     )
     tej['年月日'] = pd.to_datetime(tej['年月日'])
     tej = add_warrant_key(tej, '權證代號', '權證簡稱')
+    tej['target_stock_id'] = tej_underlying_codes(tej, dim_warrant)
 
     events = pd.DataFrame({
         'warrant_id': tej['warrant_id'],
@@ -115,6 +156,8 @@ def events_from_tej(tej_adjustment_path: Path, dim_warrant: pd.DataFrame) -> pd.
         'sequence': pd.to_numeric(tej['序號'], errors='coerce').fillna(1).astype(int),
         'strike': pd.to_numeric(tej['履約價(元)'], errors='coerce'),
         'ratio': pd.to_numeric(tej['行使比例'], errors='coerce'),
+        'target_stock_id': tej['target_stock_id'],
+        'target_name': tej['標的簡稱'],
         'event_type': tej['事件說明'].map({'上市櫃': 'issuance'}).fillna('change'),
     })
     events['source'] = 'tej'
@@ -156,6 +199,8 @@ def events_from_mops_strike(
             'ratio': adjustment['latest_ratio'],
             'cap': adjustment.get('latest_cap'),
             'floor': adjustment.get('latest_floor'),
+            'target_stock_id': adjustment['target_stock_id'],
+            'target_name': adjustment['target_name'],
             'event_type': 'adjustment',
         }))
     reset_tables = [
@@ -178,6 +223,8 @@ def events_from_mops_strike(
             'ratio': reset['latest_ratio'],
             'cap': reset.get('reset_cap'),
             'floor': reset.get('reset_floor'),
+            'target_stock_id': reset['target_stock_id'],
+            'target_name': reset['target_name'],
             'event_type': 'reset',
         }))
     if not frames:
@@ -361,6 +408,10 @@ def events_from_dim(
         'ratio': uncovered['alloc_qty_per_1k'] / 1000.0,
         'cap': uncovered['original_cap'],
         'floor': uncovered['original_floor'],
+        # The dimension table's underlying is post-conversion; a warrant
+        # outside TEJ has no issuance-time record of it anywhere.
+        'target_stock_id': uncovered['target_stock_id'],
+        'target_name': uncovered['target_name'],
         'event_type': 'issuance',
     })
     events['source'] = 'dim_synthesised'
@@ -486,6 +537,68 @@ def events_from_snapshot_diff(
           f' ({expiry_only_count:,} expiry only;'
           f' {int((effective_date < crawl_date).sum()):,} on an already-expired warrant, dated at its expiry)')
     return diff_events
+
+
+def events_from_target_closure(
+    dim_warrant: pd.DataFrame,
+    events: pd.DataFrame,
+    crawl_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """Close the underlying the chain ends on against the dimension table.
+
+    The dimension table holds the underlying of MOPS's latest record of the
+    warrant: the snapshot's for a live one, the delisted sweep's for an
+    expired one, both post-conversion. Where the last event still names
+    another code, the move fell where no event source dates it -- a
+    warrant outside TEJ whose conversion row MOPS never posted, or a
+    conversion between the seed's end and the first crawl -- and this
+    records it no later than it happened: at the crawl for a live warrant,
+    at expiry for an expired one, exactly as
+    :func:`events_from_snapshot_diff` dates a strike. None was needed on
+    the 2026-11-03 build.
+    """
+    ordered = events.dropna(subset=['effective_date']).sort_values(WARRANT_KEY + ['effective_date', 'sequence'])
+    last_known = (
+        ordered.groupby(WARRANT_KEY, sort=False)['target_stock_id'].last()
+        .rename('known_target_stock_id')
+        .reset_index()
+    )
+    compared = dim_warrant[WARRANT_KEY + ['target_stock_id', 'target_name', 'exercise_end_date']].merge(
+        last_known, on=WARRANT_KEY, how='inner'
+    )
+    moved = compared[
+        compared['known_target_stock_id'].notna()
+        & (compared['known_target_stock_id'] != compared['target_stock_id'])
+    ]
+    if moved.empty:
+        return empty_events()
+    closure = pd.DataFrame({
+        'warrant_id': moved['warrant_id'],
+        'warrant_name': moved['warrant_name'],
+        'effective_date': pd.to_datetime(moved['exercise_end_date']).clip(upper=crawl_date).fillna(crawl_date),
+        'sequence': 9,
+        'target_stock_id': moved['target_stock_id'],
+        'target_name': moved['target_name'],
+        'event_type': 'target_change',
+    })
+    closure['source'] = 'dim_closure'
+    closure['source_rank'] = 5
+    moves = moved.groupby(['known_target_stock_id', 'target_stock_id', 'target_name']).size()
+    print(f'underlying closed against the dimension table: {len(closure):,} warrants')
+    for (old_code, new_code, new_name), count in moves.items():
+        print(f'  {old_code} -> {new_code} {new_name}: {count:,}')
+    return closure
+
+
+def underlying_names(dim_warrant: pd.DataFrame, events: pd.DataFrame) -> pd.Series:
+    """Code -> name, MOPS's spelling first, TEJ's where MOPS never named the code."""
+    mops_names = pd.concat([
+        dim_warrant[['target_stock_id', 'target_name']],
+        events.loc[events['source'] != 'tej', ['target_stock_id', 'target_name']],
+    ]).dropna()
+    tej_names = events.loc[events['source'] == 'tej', ['target_stock_id', 'target_name']].dropna()
+    names = pd.concat([mops_names, tej_names]).drop_duplicates(subset=['target_stock_id'], keep='first')
+    return names.set_index('target_stock_id')['target_name']
 
 
 def trading_days_before(dates: pd.Series, days: int) -> pd.Series:
@@ -631,8 +744,9 @@ def chain_events(
     droppable = is_after_expiry & ~is_first_event
     if droppable.any():
         print(f'dropped {int(droppable.sum()):,} events dated after exercise_end_date')
-    events = events[~droppable]
+    events = events[~droppable].copy()
 
+    events['target_name'] = events['target_stock_id'].map(underlying_names(dim_warrant, events))
     history = events.merge(
         dim_warrant[WARRANT_KEY + STATIC_COLUMNS], on=WARRANT_KEY, how='left'
     )
@@ -717,6 +831,13 @@ def build_history(cache_directory: Path, dim_warrant: pd.DataFrame) -> pd.DataFr
     events = pd.concat(
         [events, events_from_snapshot_diff(cache_directory, dim_warrant, events, scheduled_expiry)],
         ignore_index=True,
+    )
+    snapshot = load_raw_table(cache_directory, 'warrant_active_snapshot')
+    crawl_date = (
+        pd.to_datetime(snapshot['crawl_date']).max() if snapshot is not None else pd.Timestamp(taiwan_today())
+    )
+    events = pd.concat(
+        [events, events_from_target_closure(dim_warrant, events, crawl_date)], ignore_index=True
     )
 
     for column in ['exercise_end_date', 'last_trade_date']:

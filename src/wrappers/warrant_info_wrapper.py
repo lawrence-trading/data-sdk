@@ -105,16 +105,19 @@ class WarrantInfoWrapper:
           sequence          (int)   tie-break for two events on one date
           strike            (float)
           ratio             (float) shares per warrant unit
-          event_type        (str)   issuance | change | expiry_change | adjustment | reset | snapshot_diff
-          source            (str)   tej | mops_strike | mops_announcement | mops_snapshot | dim_synthesised
+          event_type        (str)   issuance | change | expiry_change | adjustment | reset | snapshot_diff | target_change
+          source            (str)   tej | mops_strike | mops_announcement | mops_snapshot | dim_synthesised | dim_closure
           source_rank       (int)   precedence used to resolve same-moment rows
           exercise_end_date (date)
           cap / floor       (float) pre-2010 capped calls only
           last_trade_date   (date)
           issuer            (str)
           type              (str)   "認購" (call) | "認售" (put)
-          target_stock_id   (str)   underlying stock code
-          target_name       (str)   underlying stock name
+          target_stock_id   (str)   underlying stock code as of this row:
+                                     a warrant whose underlying was converted
+                                     (中光電 5371 -> 3718, 2026-09-03) shows
+                                     the old code before and the new after
+          target_name       (str)   underlying stock name for that code
           market            (str)   "twse" | "otc"
           list_date         (date)  null when MOPS corrupted it and neither
                                      TEJ nor FinMind could repair it

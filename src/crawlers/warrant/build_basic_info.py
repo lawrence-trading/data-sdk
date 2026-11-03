@@ -11,8 +11,10 @@ Three sources, in precedence order per field:
 2. ``mops_raw/warrant_active_snapshot`` -- supplies every live warrant (the
    basic-info resource records a warrant only once it has expired) and
    overwrites the *mutable* term fields (``exercise_end_date``,
-   ``last_trade_date``, ``latest_*``) of anything it covers. The snapshot has
-   no cursor and is replaced whole every run, so it always reflects MOPS today.
+   ``last_trade_date``, ``latest_*``) and the underlying (``target_stock_id``,
+   ``target_name``, which a share conversion or merger moves -- 中光電 5371 ->
+   中光電投控 3718 on 2026-09-03) of anything it covers. The snapshot has no
+   cursor and is replaced whole every run, so it always reflects MOPS today.
 3. the TEJ Pro export (``$DATA_SDK_TEJ_WARRANTS_PATH``) -- repairs ``list_date`` /
    ``exercise_start_date``, which MOPS itself serves corrupted (~51,500 rows,
    nearly all OTC warrants expired 2011-2019, with both set to the literal
@@ -64,6 +66,13 @@ DATE_COLUMNS = [
 ]
 # Fields the snapshot is allowed to overwrite: everything that can change after
 # issuance. original_* and the identity columns are deliberately not here.
+# The underlying is mutable too: a share conversion or merger moves every
+# live warrant on it to the new code (中光電 5371 -> 中光電投控 3718, 精星 8183
+# -> 精成科 6191, 三商壽 2867 -> 玉山金 2884, all in 2026), and MOPS updates
+# only the live ones -- an expired warrant keeps the underlying it expired on,
+# which is what the basic-info sweep records. So after the overlay every row
+# carries the underlying of MOPS's latest record of it; the point-in-time
+# version is the history's target_stock_id state column (build_history).
 MUTABLE_TERM_COLUMNS = [
     'exercise_end_date',
     'last_trade_date',
@@ -71,6 +80,8 @@ MUTABLE_TERM_COLUMNS = [
     'latest_cap',
     'latest_floor',
     'alloc_qty_per_1k',
+    'target_stock_id',
+    'target_name',
 ]
 
 
@@ -133,6 +144,7 @@ def overlay_snapshot(basic: pd.DataFrame, snapshot: pd.DataFrame) -> pd.DataFram
     out = basic.merge(snapshot_terms, on=WARRANT_KEY, how='left', suffixes=('', '_snapshot'))
 
     is_covered = out['crawl_date'].notna()
+    target_before = out[['target_stock_id', 'target_name']].copy()
     changed_count = 0
     for column in MUTABLE_TERM_COLUMNS:
         snapshot_column = f'{column}_snapshot'
@@ -143,6 +155,16 @@ def overlay_snapshot(basic: pd.DataFrame, snapshot: pd.DataFrame) -> pd.DataFram
     out.loc[is_covered, 'term_source'] = 'mops_snapshot'
 
     print(f'snapshot covers {int(is_covered.sum()):,} warrants, refreshed {changed_count:,} field values')
+    # Reported on its own: an underlying that moved is a reorganization.
+    target_moved = target_before['target_stock_id'].ne(out['target_stock_id'])
+    if target_moved.any():
+        moves = (
+            target_before[target_moved]
+            .join(out.loc[target_moved, ['target_stock_id', 'target_name']], rsuffix='_now')
+            .value_counts()
+        )
+        for (old_id, old_name, new_id, new_name), count in moves.items():
+            print(f'  underlying moved: {old_id} {old_name} -> {new_id} {new_name} on {count:,} warrants')
     return out.drop(columns=[f'{column}_snapshot' for column in MUTABLE_TERM_COLUMNS] + ['crawl_date'])
 
 
