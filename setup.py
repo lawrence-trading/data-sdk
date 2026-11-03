@@ -13,7 +13,6 @@ setup(
         "FinMind",
         "shioaji",
         "requests",
-        "tejapi",
     ],
     author="User",
     description="Data SDK for FinMind and Shioaji wrappers and crawlers",

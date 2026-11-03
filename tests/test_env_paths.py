@@ -21,7 +21,7 @@ ACCESSORS = [
 
 @pytest.mark.parametrize("var,accessor", ACCESSORS, ids=[v for v, _ in ACCESSORS])
 def test_unset_variable_means_current_directory_with_a_warning(var, accessor, monkeypatch, capsys, tmp_path):
-    monkeypatch.chdir(tmp_path)  # TEJWrapper._cache_dir calls makedirs on the result
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv(var, raising=False)
     assert Path(accessor()) == Path(".")
     assert capsys.readouterr().err.strip() == f"Warning: {var} not set. Using current directory."
@@ -42,7 +42,25 @@ def test_empty_variable_counts_as_unset(monkeypatch, capsys):
     assert "DATA_SDK_FOP_PARQUET_PATH not set" in capsys.readouterr().err
 
 
-def test_tej_cache_dir_is_created(monkeypatch, tmp_path):
-    monkeypatch.setenv("DATA_SDK_TEJ_CACHE_PATH", str(tmp_path / "tej" / "cache"))
-    assert Path(TEJWrapper._cache_dir()).is_dir()
+def test_tej_reads_the_cache_without_a_token_or_tejapi(monkeypatch, tmp_path):
+    import sys
 
+    monkeypatch.setitem(sys.modules, "tejapi", None)   # any import of tejapi fails
+    monkeypatch.delenv("TEJ_API_TOKEN", raising=False)
+    monkeypatch.setenv("DATA_SDK_TEJ_CACHE_PATH", str(tmp_path))
+    (tmp_path / "ewsale.csv").write_text(
+        "coid,mdate,annd_s,d0001,d0002,d0003\n0050,2026-09-01,2026-10-09,1,1,0.5\n"
+    )
+    before = (tmp_path / "ewsale.csv").stat().st_mtime_ns
+    df = TEJWrapper().get_ewsale()
+    assert df["coid"].tolist() == ["0050"]
+    assert str(df["annd_s"].dtype) == "datetime64[ns]"
+    assert (tmp_path / "ewsale.csv").stat().st_mtime_ns == before
+    assert [p.name for p in tmp_path.iterdir()] == ["ewsale.csv"]
+
+
+def test_tej_missing_cache_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_SDK_TEJ_CACHE_PATH", str(tmp_path))
+    with pytest.raises(FileNotFoundError):
+        TEJWrapper().get_ewsale()
+    assert list(tmp_path.iterdir()) == []
