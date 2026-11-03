@@ -142,7 +142,7 @@ df = finmind.get_broker("2024-01-02", "2330")
 day = finmind.get_broker_day("2024-01-02", sids=["2330", "2317"])
 
 # Filling the archive is not part of this SDK: the scheduled writer lives in
-# sysadmin-utils (finmind_wrapper/broker_writer.py) and runs as datacron.
+# sysadmin-utils (finmind_wrapper/broker_writer.py) and runs as galileo.
 
 # Warrant branch report (TaiwanStockWarrantTradingDailyReport, from 2023-06-21):
 # same layout and columns, one file per day under DATA_SDK_FINMIND_BROKER_WARRANT_PATH.
