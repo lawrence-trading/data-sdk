@@ -1,10 +1,11 @@
-import os
 from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
 import polars as pl
+
+from .paths import env_path
 
 _FOP_TYPES = {
     "futures": "futures",
@@ -17,7 +18,7 @@ _FOP_SESSION_TOKENS = {"day": "0840", "night": "1455"}
 
 
 def _fop_base_path() -> Path:
-    return Path(os.environ.get("DATA_SDK_FOP_PARQUET_PATH", "/mnt/nfs/backup/fop_parquets"))
+    return env_path("DATA_SDK_FOP_PARQUET_PATH")
 
 
 def get_fop_parquet(
@@ -30,7 +31,7 @@ def get_fop_parquet(
 ) -> Union[pd.DataFrame, pl.LazyFrame]:
     """Load a raw TAIFEX futures/options (FOP) market-data parquet for a given day.
 
-    Parquet path is taken from DATA_SDK_FOP_PARQUET_PATH (default /mnt/nfs/backup/fop_parquets).
+    Parquet path is taken from DATA_SDK_FOP_PARQUET_PATH (e.g. /mnt/nfs/backup/fop_parquets).
     Files are named {futures|options}_{day|night}_YYYYMMDD_{0840|1455}_{i024|i081|i083}.parquet;
     i084 files use a snapshot infix: {futures|options}_{day|night}_snapshot_YYYYMMDD_{0840|1455}_i084.parquet.
 

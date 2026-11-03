@@ -13,14 +13,12 @@ from data_sdk import (
     FinMindWrapper,
     ShioajiWrapper,
     TEJWrapper,
-    WarrantInfoWrapper,
     get_fop_order_book,
     get_fop_parquet,
     get_order_book_odd_lots,
     get_order_book_stocks,
     get_order_book_warrant,
 )
-from pathlib import Path
 
 shioaji_wrapper = ShioajiWrapper()
 finmind_wrapper = FinMindWrapper()
@@ -44,6 +42,19 @@ pre_open = (
     .filter(pl.col("match_time") < 90_000_000_000)
     .collect()
 )
+```
+
+`get_order_book_stocks` reads two sources of the same Format 6 feed, chosen with `mode`:
+
+- `mode="native"`: our own capture in `DATA_SDK_ORDER_BOOK_PARQUET_PATH` (from 2025-05-20).
+- `mode="tej"`: the TEJ conversion in `DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH` (2020-06-01 to 2026-06-30). `timestamp` is null.
+- `mode="merged"` (default): the TEJ file when the day has one, otherwise the native file. A day in neither raises `FileNotFoundError`.
+
+One parquet is read in every mode, so filters on the returned `LazyFrame` push down to it.
+
+```python
+native = get_order_book_stocks("2026-01-02", is_twse=True, mode="native")
+tej    = get_order_book_stocks("2022-03-01", is_twse=False, mode="tej")
 ```
 
 ## Installation
@@ -70,37 +81,29 @@ Set the following environment variables to configure the SDK:
 
 ### Cache Storage Paths
 These variables govern where downloaded data is cached and read from.
-The first four default to the current working directory if unset; the rest
-default to the `/mnt/nfs/backup/...` paths shown.
+If one is not set, it defaults to the current working directory and a
+warning is printed to stderr.
 
 ```bash
-# default to the current working directory if unset
 export DATA_SDK_FINMIND_BROKER_PATH="/mnt/nfs/backup/finmind_broker"
 export DATA_SDK_FINMIND_BROKER_WARRANT_PATH="/mnt/nfs/backup/finmind_broker/warrant_daily"
 export DATA_SDK_SHIOAJI_TICKS_PATH="/mnt/nfs/backup/shioaji_ticks"
 export DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH="/mnt/nfs/backup/shioaji_futures_ticks"
 export DATA_SDK_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/parquets"
-
-# default to these paths if unset
+export DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/tej_parquets"
 export DATA_SDK_TEJ_CACHE_PATH="/mnt/nfs/backup/tej_cache"
 export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"
-
-# warrant crawler related paths (default to these paths if unset)
 export DATA_SDK_WARRANT_CACHE_PATH="/mnt/nfs/backup/warrant_history"
 export DATA_SDK_TEJ_WARRANTS_PATH="/mnt/nfs/backup/tej_warrants"
-export DATA_SDK_FINMIND_WARRANTS_PATH="/mnt/nfs/backup/finmind_warrants"
-
-#TODO: the default behaviors should be consistent repowide
 ```
 
 ### API Keys
-Required for fetching data from FinMind, Shioaji and TEJ.
+Required for fetching data from FinMind and Shioaji. TEJ reads need no key.
 
 ```bash
 export FINMIND_API_TOKEN=your_token
 export SHIOAJI_API_KEY=your_api_key
 export SHIOAJI_SECRET_KEY=your_secret_key
-export TEJ_API_TOKEN=your_tej_token
 ```
 
 ### FinMind Rate Limiting
@@ -122,14 +125,12 @@ from data_sdk import (
     FinMindWrapper,
     ShioajiWrapper,
     TEJWrapper,
-    WarrantInfoWrapper,
     get_fop_order_book,
     get_fop_parquet,
     get_order_book_odd_lots,
     get_order_book_stocks,
     get_order_book_warrant,
 )
-from pathlib import Path
 
 # Read FinMind broker data. Reads never download: the archive is filled by a
 # scheduled writer, and a missing day raises FileNotFoundError.
@@ -168,29 +169,19 @@ df_ticks = shioaji.get_order_book("2024-01-02", "2330")
 df_fut = shioaji.get_futures_ticks("2024-08-01", "CDFR1")
 df_contracts = shioaji.get_futures_contracts()  # currently-listed contracts only
 
-# TEJ monthly revenue announcements (TWN/EWSALE, incrementally cached as CSV;
-# optionally set TEJ_API_TOKEN / DATA_SDK_TEJ_CACHE_PATH). Columns: coid,
-# mdate (revenue month), annd_s (announcement date), d0001/d0002/d0003
-# (revenue, prior-year revenue, YoY %)
+# TEJ monthly revenue announcements (TWN/EWSALE), read from the shared CSV
+# cache in DATA_SDK_TEJ_CACHE_PATH; no token, no TEJ call. The cache is
+# refreshed by sysadmin-utils' tej_wrapper/refresh_ewsale.py (datacron).
+# Columns: coid, mdate (revenue month), annd_s (announcement date),
+# d0001/d0002/d0003 (revenue, prior-year revenue, YoY %)
 tej = TEJWrapper()
-df_rev = tej.get_ewsale()                        # from 2021-01-01 (subscription floor)
-df_rev = tej.get_ewsale(min_date="2023-01-01")   # custom start for a cold fetch
-# Warm calls re-fetch the trailing 60 days (EWSALE_REFETCH_DAYS) and merge: TEJ
-# keeps adding rows for an announcement date days after the fact, so a
-# strictly-newer cursor loses them. refetch_since widens that window for a
-# one-off repair -- EWSALE_MIN_DATE rebuilds the whole table as a union-merge
-# (~157k rows, ~31% of the 500k/day row quota; not for a daily job).
-df_rev = tej.get_ewsale(refetch_since=TEJWrapper.EWSALE_MIN_DATE)
-
-# Fetch Taiwan warrant metadata (cached to disk, requires FINMIND_API_TOKEN)
-warrant_info = WarrantInfoWrapper(cache_dir=Path("/tmp/warrant_cache"))
-df_summary = warrant_info.get_warrant_summary()   # all warrants with strike/expiry
-df_names   = warrant_info.get_warrant_names()     # warrant code → stock_name
-issuer_map = warrant_info.build_issuer_map()      # {warrant_id: issuer_name}
+df_rev = tej.get_ewsale()
 
 # Order book from parquet (requires DATA_SDK_ORDER_BOOK_PARQUET_PATH)
 df_ob = get_order_book_stocks("2026-01-02", is_twse=True, sid="2330")
-df_ob_day = get_order_book_stocks("2026-01-02", is_twse=True)  # entire day
+df_ob_day = get_order_book_stocks("2026-01-02", is_twse=True)  # entire day, TEJ if present else native
+df_ob_native = get_order_book_stocks("2026-01-02", is_twse=True, mode="native")  # own capture only
+df_ob_tej = get_order_book_stocks("2021-06-29", is_twse=True, mode="tej")        # TEJ only
 df_odd = get_order_book_odd_lots("2026-01-02", is_twse=True, sid="2330")
 df_warrant = get_order_book_warrant("2026-01-02", is_twse=True)           # all warrants
 df_w_sid   = get_order_book_warrant("2026-01-02", is_twse=True, sid="700339")  # single warrant
@@ -198,7 +189,7 @@ df_w_sid   = get_order_book_warrant("2026-01-02", is_twse=True, sid="700339")  #
 
 ### TAIFEX futures/options (FOP) parquet
 
-Raw TAIFEX market-data parquets (requires `DATA_SDK_FOP_PARQUET_PATH`, defaults to `/mnt/nfs/backup/fop_parquets`).
+Raw TAIFEX market-data parquets (requires `DATA_SDK_FOP_PARQUET_PATH`).
 Formats: `i024` deals, `i081` order-book deltas, `i083` session-open order-book snapshots,
 `i084` snapshot-channel refresh cycles (only captured for recent dates, ~2026-06-26 onward).
 

@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 from FinMind.data import DataLoader
 
 from .finmind_rate_limit import FinMindRateLimiter, batch_size
+from .paths import env_path
 
 # Column order of the archive; a window is read as one multi-file scan, so a
 # written day must not reshuffle it.
@@ -117,25 +118,11 @@ class FinMindWrapper:
 
     @staticmethod
     def broker_dir():
-        output_dir = os.environ.get("DATA_SDK_FINMIND_BROKER_PATH")
-        if not output_dir:
-            print(
-                "Warning: DATA_SDK_FINMIND_BROKER_PATH not set. Using current directory.",
-                file=sys.stderr,
-            )
-            output_dir = "."
-        return output_dir
+        return str(env_path("DATA_SDK_FINMIND_BROKER_PATH"))
 
     @staticmethod
     def warrant_broker_dir():
-        output_dir = os.environ.get("DATA_SDK_FINMIND_BROKER_WARRANT_PATH")
-        if not output_dir:
-            print(
-                "Warning: DATA_SDK_FINMIND_BROKER_WARRANT_PATH not set. Using current directory.",
-                file=sys.stderr,
-            )
-            output_dir = "."
-        return output_dir
+        return str(env_path("DATA_SDK_FINMIND_BROKER_WARRANT_PATH"))
 
     @staticmethod
     def broker_day_path(day, output_dir=None, warrant=False):

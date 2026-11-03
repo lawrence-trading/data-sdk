@@ -1,9 +1,12 @@
 import os
+import tempfile
 import time
 import pandas as pd
+import pyarrow as pa
 import shioaji as sj
 from pathlib import Path
-import sys
+
+from .paths import env_path
 
 class ShioajiWrapper:
     _api = None
@@ -81,6 +84,14 @@ class ShioajiWrapper:
                 )
             time.sleep(0.1)
 
+    @staticmethod
+    def ticks_dir() -> Path:
+        return env_path("DATA_SDK_SHIOAJI_TICKS_PATH")
+
+    @staticmethod
+    def futures_ticks_dir() -> Path:
+        return env_path("DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH")
+
     def _download_ticks_to_parquet(self, day, sid, dest_path: Path, data_dir: Path) -> pd.DataFrame:
         self._ensure_contracts_fetched()
 
@@ -92,14 +103,27 @@ class ShioajiWrapper:
         print(ShioajiWrapper._api.usage())
         df = pd.DataFrame({**ticks})
         data_dir.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(dest_path)
+        self._publish_parquet(df, dest_path)
         return df
+
+    @staticmethod
+    def _publish_parquet(df: pd.DataFrame, dest_path: Path) -> None:
+        """Write ``dest_path`` through a ``.tmp`` sibling and a rename, so a
+        concurrent reader never sees a torn file. The file is 0666 because the
+        Shioaji caches are open to every uid on every host."""
+        fd, tmp_path = tempfile.mkstemp(dir=dest_path.parent, suffix=".tmp")
+        os.close(fd)
+        try:
+            df.to_parquet(tmp_path)
+            os.chmod(tmp_path, 0o666)
+            os.replace(tmp_path, dest_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
     def get_order_book(self, day, sid):
         # Determine parquet path
-        data_dir = Path(os.environ.get("DATA_SDK_SHIOAJI_TICKS_PATH", "."))
-        if not os.environ.get("DATA_SDK_SHIOAJI_TICKS_PATH"):
-            print("Warning: DATA_SDK_SHIOAJI_TICKS_PATH not set. Using current directory.", file=sys.stderr)
+        data_dir = ShioajiWrapper.ticks_dir()
 
         dest_path = data_dir / f"{sid}_{day}.parquet"
 
@@ -109,7 +133,7 @@ class ShioajiWrapper:
             else:
                 try:
                     return pd.read_parquet(dest_path)
-                except Exception:
+                except pa.ArrowInvalid:
                     dest_path.unlink(missing_ok=True)
 
         return self._download_ticks_to_parquet(day, sid, dest_path, data_dir)
@@ -128,7 +152,7 @@ class ShioajiWrapper:
         print(ShioajiWrapper._api.usage())
         df = pd.DataFrame({**ticks})
         data_dir.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(dest_path)
+        self._publish_parquet(df, dest_path)
         return df
 
     def get_futures_ticks(self, day, code):
@@ -140,9 +164,7 @@ class ShioajiWrapper:
         re-downloaded.
         """
         # Determine parquet path
-        data_dir = Path(os.environ.get("DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH", "."))
-        if not os.environ.get("DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH"):
-            print("Warning: DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH not set. Using current directory.", file=sys.stderr)
+        data_dir = ShioajiWrapper.futures_ticks_dir()
 
         dest_path = data_dir / f"{code}_{day}.parquet"
 
@@ -152,7 +174,7 @@ class ShioajiWrapper:
             else:
                 try:
                     return pd.read_parquet(dest_path)
-                except Exception:
+                except pa.ArrowInvalid:
                     dest_path.unlink(missing_ok=True)
 
         return self._download_futures_ticks_to_parquet(day, code, dest_path, data_dir)

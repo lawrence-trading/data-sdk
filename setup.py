@@ -2,13 +2,8 @@ from setuptools import setup, find_packages
 
 setup(
     name="data-sdk",
-    version="0.7.1",
-    packages=[
-        "data_sdk",
-        "data_sdk.crawlers",
-        "data_sdk.crawlers.warrant",
-        "data_sdk.wrappers",
-    ],
+    version="0.7.4",
+    packages=["data_sdk", "data_sdk.crawlers", "data_sdk.wrappers"],
     package_dir={"data_sdk": "src"},
     install_requires=[
         "numba",
