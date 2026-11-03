@@ -11,7 +11,7 @@ class TEJWrapper:
     The cache directory comes from ``DATA_SDK_TEJ_CACHE_PATH`` (e.g.
     ``/mnt/nfs/backup/tej_cache``). Reads never call TEJ and need no token: the
     cache is written by the scheduled job in sysadmin-utils
-    (``tej_wrapper/refresh_ewsale.py``), run by the datacron user.
+    (``tej_wrapper/refresh_ewsale.py``), run by the galileo user.
     """
 
     @staticmethod

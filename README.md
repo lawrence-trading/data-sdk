@@ -173,7 +173,7 @@ df_contracts = shioaji.get_futures_contracts()  # currently-listed contracts onl
 
 # TEJ monthly revenue announcements (TWN/EWSALE), read from the shared CSV
 # cache in DATA_SDK_TEJ_CACHE_PATH; no token, no TEJ call. The cache is
-# refreshed by sysadmin-utils' tej_wrapper/refresh_ewsale.py (datacron).
+# refreshed by sysadmin-utils' tej_wrapper/refresh_ewsale.py (galileo).
 # Columns: coid, mdate (revenue month), annd_s (announcement date),
 # d0001/d0002/d0003 (revenue, prior-year revenue, YoY %)
 tej = TEJWrapper()
