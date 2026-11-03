@@ -44,3 +44,28 @@ def test_miss_publishes_a_0666_file_and_no_tmp(wrapper, kind):
     assert stat.S_IMODE(path.stat().st_mode) == 0o666
     assert [p.name for p in path.parent.iterdir()] == [path.name]
     assert len(pd.read_parquet(path)) == 2
+
+
+def test_truncated_cache_is_deleted_and_refetched(wrapper):
+    w, api, tmp_path = wrapper
+    w.get_order_book("2026-01-05", "2330")
+    path = tmp_path / "ticks" / "2330_2026-01-05.parquet"
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) // 2])
+    assert len(w.get_order_book("2026-01-05", "2330")) == 2
+    assert api.calls == 2
+
+
+def test_os_error_keeps_the_file_and_does_not_refetch(wrapper, monkeypatch):
+    w, api, tmp_path = wrapper
+    w.get_order_book("2026-01-05", "2330")
+    path = tmp_path / "ticks" / "2330_2026-01-05.parquet"
+
+    def stale(*a, **k):
+        raise OSError(116, "Stale file handle")
+
+    monkeypatch.setattr(sw.pd, "read_parquet", stale)
+    with pytest.raises(OSError):
+        w.get_order_book("2026-01-05", "2330")
+    assert path.exists()
+    assert api.calls == 1

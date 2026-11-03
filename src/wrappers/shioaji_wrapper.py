@@ -2,6 +2,7 @@ import os
 import tempfile
 import time
 import pandas as pd
+import pyarrow as pa
 import shioaji as sj
 from pathlib import Path
 
@@ -132,7 +133,7 @@ class ShioajiWrapper:
             else:
                 try:
                     return pd.read_parquet(dest_path)
-                except Exception:
+                except pa.ArrowInvalid:
                     dest_path.unlink(missing_ok=True)
 
         return self._download_ticks_to_parquet(day, sid, dest_path, data_dir)
@@ -173,7 +174,7 @@ class ShioajiWrapper:
             else:
                 try:
                     return pd.read_parquet(dest_path)
-                except Exception:
+                except pa.ArrowInvalid:
                     dest_path.unlink(missing_ok=True)
 
         return self._download_futures_ticks_to_parquet(day, code, dest_path, data_dir)
