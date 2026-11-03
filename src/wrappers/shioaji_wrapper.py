@@ -1,4 +1,5 @@
 import os
+import tempfile
 import time
 import pandas as pd
 import shioaji as sj
@@ -101,8 +102,23 @@ class ShioajiWrapper:
         print(ShioajiWrapper._api.usage())
         df = pd.DataFrame({**ticks})
         data_dir.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(dest_path)
+        self._publish_parquet(df, dest_path)
         return df
+
+    @staticmethod
+    def _publish_parquet(df: pd.DataFrame, dest_path: Path) -> None:
+        """Write ``dest_path`` through a ``.tmp`` sibling and a rename, so a
+        concurrent reader never sees a torn file. The file is 0666 because the
+        Shioaji caches are open to every uid on every host."""
+        fd, tmp_path = tempfile.mkstemp(dir=dest_path.parent, suffix=".tmp")
+        os.close(fd)
+        try:
+            df.to_parquet(tmp_path)
+            os.chmod(tmp_path, 0o666)
+            os.replace(tmp_path, dest_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
     def get_order_book(self, day, sid):
         # Determine parquet path
@@ -135,7 +151,7 @@ class ShioajiWrapper:
         print(ShioajiWrapper._api.usage())
         df = pd.DataFrame({**ticks})
         data_dir.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(dest_path)
+        self._publish_parquet(df, dest_path)
         return df
 
     def get_futures_ticks(self, day, code):
