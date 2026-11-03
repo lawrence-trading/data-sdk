@@ -5,7 +5,6 @@ from .order_book_wrapper import (
     get_order_book_odd_lots,
     get_order_book_warrant,
 )
-from .warrant_info_wrapper import WarrantInfoWrapper
 from .tej_wrapper import TEJWrapper
 from .fop_wrapper import get_fop_parquet, get_fop_order_book
 
@@ -17,6 +16,5 @@ __all__ = [
     "get_order_book_warrant",
     "get_fop_parquet",
     "get_fop_order_book",
-    "WarrantInfoWrapper",
     "TEJWrapper",
 ]

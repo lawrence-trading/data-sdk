@@ -13,14 +13,12 @@ from data_sdk import (
     FinMindWrapper,
     ShioajiWrapper,
     TEJWrapper,
-    WarrantInfoWrapper,
     get_fop_order_book,
     get_fop_parquet,
     get_order_book_odd_lots,
     get_order_book_stocks,
     get_order_book_warrant,
 )
-from pathlib import Path
 
 shioaji_wrapper = ShioajiWrapper()
 finmind_wrapper = FinMindWrapper()
@@ -126,14 +124,12 @@ from data_sdk import (
     FinMindWrapper,
     ShioajiWrapper,
     TEJWrapper,
-    WarrantInfoWrapper,
     get_fop_order_book,
     get_fop_parquet,
     get_order_book_odd_lots,
     get_order_book_stocks,
     get_order_book_warrant,
 )
-from pathlib import Path
 
 # Read FinMind broker data. Reads never download: the archive is filled by a
 # scheduled writer, and a missing day raises FileNotFoundError.
@@ -185,12 +181,6 @@ df_rev = tej.get_ewsale(min_date="2023-01-01")   # custom start for a cold fetch
 # one-off repair -- EWSALE_MIN_DATE rebuilds the whole table as a union-merge
 # (~157k rows, ~31% of the 500k/day row quota; not for a daily job).
 df_rev = tej.get_ewsale(refetch_since=TEJWrapper.EWSALE_MIN_DATE)
-
-# Fetch Taiwan warrant metadata (cached to disk, requires FINMIND_API_TOKEN)
-warrant_info = WarrantInfoWrapper(cache_dir=Path("/tmp/warrant_cache"))
-df_summary = warrant_info.get_warrant_summary()   # all warrants with strike/expiry
-df_names   = warrant_info.get_warrant_names()     # warrant code → stock_name
-issuer_map = warrant_info.build_issuer_map()      # {warrant_id: issuer_name}
 
 # Order book from parquet (requires DATA_SDK_ORDER_BOOK_PARQUET_PATH)
 df_ob = get_order_book_stocks("2026-01-02", is_twse=True, sid="2330")

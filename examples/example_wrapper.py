@@ -1,11 +1,9 @@
 import os
 import pandas as pd
-from pathlib import Path
 from data_sdk import (
     FinMindWrapper,
     ShioajiWrapper,
     TEJWrapper,
-    WarrantInfoWrapper,
     get_fop_order_book,
     get_fop_parquet,
     get_order_book_odd_lots,
@@ -96,17 +94,6 @@ def main():
         print(df_rev.head())
     except Exception as e:
         print(f"TEJ revenue error: {e}")
-
-    print("\nFetching warrant info (summary + names + issuer map)...")
-    try:
-        warrant_info = WarrantInfoWrapper(cache_dir=Path("/tmp/warrant_cache"))
-        df_summary = warrant_info.get_warrant_summary()
-        print(f"Warrant summary shape: {df_summary.shape}")
-        print(df_summary.head())
-        issuer_map = warrant_info.build_issuer_map()
-        print(f"Issuer map sample: {str(issuer_map)[:50]}")
-    except Exception as e:
-        print(f"WarrantInfoWrapper error: {e}")
 
 if __name__ == "__main__":
     main()
