@@ -98,13 +98,12 @@ export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"
 ```
 
 ### API Keys
-Required for fetching data from FinMind, Shioaji and TEJ.
+Required for fetching data from FinMind and Shioaji. TEJ reads need no key.
 
 ```bash
 export FINMIND_API_TOKEN=your_token
 export SHIOAJI_API_KEY=your_api_key
 export SHIOAJI_SECRET_KEY=your_secret_key
-export TEJ_API_TOKEN=your_tej_token
 ```
 
 ### FinMind Rate Limiting
@@ -172,19 +171,13 @@ df_ticks = shioaji.get_order_book("2024-01-02", "2330")
 df_fut = shioaji.get_futures_ticks("2024-08-01", "CDFR1")
 df_contracts = shioaji.get_futures_contracts()  # currently-listed contracts only
 
-# TEJ monthly revenue announcements (TWN/EWSALE, incrementally cached as CSV;
-# optionally set TEJ_API_TOKEN / DATA_SDK_TEJ_CACHE_PATH). Columns: coid,
-# mdate (revenue month), annd_s (announcement date), d0001/d0002/d0003
-# (revenue, prior-year revenue, YoY %)
+# TEJ monthly revenue announcements (TWN/EWSALE), read from the shared CSV
+# cache in DATA_SDK_TEJ_CACHE_PATH; no token, no TEJ call. The cache is
+# refreshed by sysadmin-utils' tej_wrapper/refresh_ewsale.py (datacron).
+# Columns: coid, mdate (revenue month), annd_s (announcement date),
+# d0001/d0002/d0003 (revenue, prior-year revenue, YoY %)
 tej = TEJWrapper()
-df_rev = tej.get_ewsale()                        # from 2021-01-01 (subscription floor)
-df_rev = tej.get_ewsale(min_date="2023-01-01")   # custom start for a cold fetch
-# Warm calls re-fetch the trailing 60 days (EWSALE_REFETCH_DAYS) and merge: TEJ
-# keeps adding rows for an announcement date days after the fact, so a
-# strictly-newer cursor loses them. refetch_since widens that window for a
-# one-off repair -- EWSALE_MIN_DATE rebuilds the whole table as a union-merge
-# (~157k rows, ~31% of the 500k/day row quota; not for a daily job).
-df_rev = tej.get_ewsale(refetch_since=TEJWrapper.EWSALE_MIN_DATE)
+df_rev = tej.get_ewsale()
 
 # Fetch Taiwan warrant metadata (cached to disk, requires FINMIND_API_TOKEN)
 warrant_info = WarrantInfoWrapper(cache_dir=Path("/tmp/warrant_cache"))
