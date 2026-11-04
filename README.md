@@ -71,7 +71,9 @@ Set the following environment variables to configure the SDK:
 ### Cache Storage Paths
 These variables govern where downloaded data is cached and read from.
 If not set, they default to the current working directory, except
-`DATA_SDK_TEJ_CACHE_PATH`, which defaults to `/mnt/nfs/backup/tej_cache`.
+`DATA_SDK_TEJ_CACHE_PATH` (defaults to `/mnt/nfs/backup/tej_cache`, which stays on NFS and is read-only
+for other users) and the vendor caches marked "local" below, which default to
+`$XDG_CACHE_HOME/data_sdk/<name>`, else `~/.cache/data_sdk/<name>`.
 
 ```bash
 export DATA_SDK_FINMIND_BROKER_PATH="/mnt/nfs/backup/finmind_broker"
@@ -80,12 +82,12 @@ export DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH="/mnt/nfs/backup/shioaji_futures_tick
 export DATA_SDK_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/parquets"
 export DATA_SDK_TEJ_CACHE_PATH="/mnt/nfs/backup/tej_cache"
 export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"  # defaults to this path if unset
-export DATA_SDK_FINLAB_CACHE_PATH="/mnt/nfs/backup/finlab_cache"    # defaults to this path if unset
-export DATA_SDK_TAIFEX_CACHE_PATH="/mnt/nfs/backup/taifex_cache"    # defaults to this path if unset
+export DATA_SDK_FINLAB_CACHE_PATH="$HOME/.cache/data_sdk/finlab_cache"    # local default: $XDG_CACHE_HOME/data_sdk/finlab_cache
+export DATA_SDK_TAIFEX_CACHE_PATH="$HOME/.cache/data_sdk/taifex_cache"    # local default: $XDG_CACHE_HOME/data_sdk/taifex_cache
 export DATA_SDK_MARKET_CALENDAR_CACHE_PATH="$HOME/.cache/data_sdk/market_calendar"  # default: $XDG_CACHE_HOME/data_sdk/market_calendar, else ~/.cache/data_sdk/market_calendar
 export DATA_SDK_FINMIND_CALENDAR_CACHE_PATH="$HOME/.cache/data_sdk/finmind_calendar"  # default: $XDG_CACHE_HOME/data_sdk/finmind_calendar, else ~/.cache/data_sdk/finmind_calendar; one JSON file per year, `rm` a year's file (or the whole directory) to clear it -- see "FinMind's taiwan_stock_trading_date" below
-export DATA_SDK_FINMIND_WEIGHT_PATH="/mnt/nfs/backup/finmind_cache/twii_weight"     # defaults to this path if unset
-export DATA_SDK_CB_CACHE_PATH="/mnt/nfs/backup/finmind_cache/cb"                    # defaults to this path if unset
+export DATA_SDK_FINMIND_WEIGHT_PATH="$HOME/.cache/data_sdk/finmind_cache/twii_weight"     # local default: $XDG_CACHE_HOME/data_sdk/finmind_cache/twii_weight
+export DATA_SDK_CB_CACHE_PATH="$HOME/.cache/data_sdk/finmind_cache/cb"                    # local default: $XDG_CACHE_HOME/data_sdk/finmind_cache/cb
 ```
 
 ### API Keys

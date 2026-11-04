@@ -21,7 +21,7 @@
 
 No credential is involved. Each endpoint serves only its latest publication,
 so a fetch is stored under the day the payload itself carries
-(``DATA_SDK_TAIFEX_CACHE_PATH``, default ``/mnt/nfs/backup/taifex_cache``;
+(``DATA_SDK_TAIFEX_CACHE_PATH``, default ``<user cache dir>/data_sdk/taifex_cache``;
 the stored file is the rows as JSON whichever form the endpoint answered)
 and a read for a specific day is answered from that store or not at all.
 """
@@ -35,6 +35,8 @@ import tempfile
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
+
+from .local_cache import local_cache_dir
 
 OPENAPI_BASE = "https://openapi.taifex.com.tw/v1"
 DAILY_MARKET_REPORT_FUT_URL = f"{OPENAPI_BASE}/DailyMarketReportFut"
@@ -132,8 +134,7 @@ class TaifexResponseError(ValueError):
 
 
 class TaifexWrapper:
-    _DEFAULT_CACHE_DIR = "/mnt/nfs/backup/taifex_cache"
-
+    
     def __init__(
         self,
         fetch_json: Optional[Callable[[str], list]] = None,
@@ -236,7 +237,7 @@ class TaifexWrapper:
 
     @staticmethod
     def cache_dir() -> str:
-        return os.environ.get("DATA_SDK_TAIFEX_CACHE_PATH", TaifexWrapper._DEFAULT_CACHE_DIR)
+        return os.environ.get("DATA_SDK_TAIFEX_CACHE_PATH") or local_cache_dir("taifex_cache")
 
     @classmethod
     def cache_path(cls, endpoint: str, day: str, suffix: str) -> str:

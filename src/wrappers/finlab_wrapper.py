@@ -25,7 +25,7 @@ table's issued share count and listing market, for the last completed day's
 volume, turnover, close, and the share count that turns them into a turnover
 rate and a market capitalisation.
 
-Cache: ``DATA_SDK_FINLAB_CACHE_PATH`` (default ``/mnt/nfs/backup/finlab_cache``),
+Cache: ``DATA_SDK_FINLAB_CACHE_PATH`` (default ``<user cache dir>/data_sdk/finlab_cache``),
 one parquet per ``(dataset, query day)`` holding the trailing rows dated
 before that day. A warm read needs no token; a cold fetch needs
 ``FINLAB_API_TOKEN`` and imports ``finlab`` lazily.
@@ -37,6 +37,8 @@ import tempfile
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+from .local_cache import local_cache_dir
 
 # 重訊公告 (material-information announcements), confirmed 2026-10-08:
 #   - finlab.data.search("重訊") and search("重大訊息") both resolve to exactly
@@ -164,10 +166,9 @@ def align_latest_rows(
 
 
 class FinLabWrapper:
-    """FinLab ``data.get`` behind a per-day NFS cache."""
+    """FinLab ``data.get`` behind a per-day on-disk cache."""
 
     _logged_in = False
-    _DEFAULT_CACHE_DIR = "/mnt/nfs/backup/finlab_cache"
 
     #: Fetches one dataset and returns FinLab's frame (date index, stock
     #: columns). Swapped in tests; the default imports finlab on first use.
@@ -183,7 +184,7 @@ class FinLabWrapper:
 
     @staticmethod
     def cache_dir() -> str:
-        return os.environ.get("DATA_SDK_FINLAB_CACHE_PATH", FinLabWrapper._DEFAULT_CACHE_DIR)
+        return os.environ.get("DATA_SDK_FINLAB_CACHE_PATH") or local_cache_dir("finlab_cache")
 
     @staticmethod
     def _slug(dataset: str) -> str:

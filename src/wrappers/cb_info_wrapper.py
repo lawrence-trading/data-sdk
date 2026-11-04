@@ -47,6 +47,8 @@ from typing import Callable, Iterable, List, Optional
 
 import pandas as pd
 
+from .local_cache import local_cache_dir
+
 # The owner's 2026-10-08 decision (ISSUES.md I-216): every convertible bond's
 # face value is NT$100, full stop -- no per-bond lookup, no "verify this"
 # code path second-guessing it.
@@ -111,7 +113,7 @@ class CbInfoWrapper:
 
     @staticmethod
     def cache_dir() -> str:
-        return os.environ.get("DATA_SDK_CB_CACHE_PATH", "/mnt/nfs/backup/finmind_cache/cb")
+        return os.environ.get("DATA_SDK_CB_CACHE_PATH") or local_cache_dir("finmind_cache", "cb")
 
     def _info_cache_path(self) -> str:
         return os.path.join(self._cache_dir, "cb_info.parquet")

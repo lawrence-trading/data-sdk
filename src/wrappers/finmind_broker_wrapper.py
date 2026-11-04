@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from FinMind.data import DataLoader
 
+from .local_cache import local_cache_dir
 from .finmind_rate_limit import FinMindRateLimiter, batch_size
 
 TAIPEI = dt.timezone(dt.timedelta(hours=8))
@@ -216,8 +217,8 @@ class FinMindWrapper:
 
     @staticmethod
     def weight_dir():
-        return os.environ.get(
-            "DATA_SDK_FINMIND_WEIGHT_PATH", "/mnt/nfs/backup/finmind_cache/twii_weight"
+        return os.environ.get("DATA_SDK_FINMIND_WEIGHT_PATH") or local_cache_dir(
+            "finmind_cache", "twii_weight"
         )
 
     @staticmethod
@@ -249,7 +250,7 @@ class FinMindWrapper:
         date`` indexed by ``stock_id`` (str).
 
         Cached per requested ``day`` to ``DATA_SDK_FINMIND_WEIGHT_PATH``
-        (default ``/mnt/nfs/backup/finmind_cache/twii_weight/<day>.parquet``);
+        (default ``<user cache dir>/data_sdk/finmind_cache/twii_weight/<day>.parquet``);
         a cache file is only ever written for a non-empty result, so a
         failed lookup is retried from the network on the next call instead
         of freezing into a permanent empty read. A warm day needs no token,
