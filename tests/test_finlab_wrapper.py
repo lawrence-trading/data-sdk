@@ -1,6 +1,7 @@
 """FinLabWrapper against synthetic tables: no finlab import, no token."""
 
 import datetime as dt
+import json
 import logging
 import os
 import sys
@@ -19,6 +20,7 @@ from data_sdk.wrappers.finlab_wrapper import (
     TRADING_STATS_DATASETS,
     UNIVERSE_STATS_DATASETS,
     align_latest_rows,
+    expected_report_date,
     latest_before_today,
     previous_weekday,
 )
@@ -45,6 +47,8 @@ def _aligned_tables():
 @pytest.fixture
 def cache_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_SDK_FINLAB_CACHE_PATH", str(tmp_path))
+    # No market calendar unless a test writes one: completeness falls back to the weekday rule.
+    monkeypatch.setenv("DATA_SDK_MARKET_CALENDAR_CACHE_PATH", str(tmp_path / "market_calendar"))
     monkeypatch.delenv("FINLAB_API_TOKEN", raising=False)
     monkeypatch.setattr(FinLabWrapper, "_logged_in", False)
     return tmp_path
@@ -624,10 +628,18 @@ def test_fridays_row_is_complete_for_monday(cache_dir):
     assert later.calls == []
 
 
-def test_the_day_after_a_weekday_holiday_is_fetched_again_and_served(cache_dir):
+def _cache_calendar(cache_dir, year, closed_days):
+    """A TWSE holidaySchedule payload for ``year`` in the redirected calendar cache."""
+    folder = cache_dir / "market_calendar"
+    folder.mkdir(exist_ok=True)
+    payload = {"data": [[day, "休市", ""] for day in closed_days], "total": len(closed_days)}
+    (folder / f"{year}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_without_a_cached_calendar_the_day_after_a_holiday_is_fetched_again_and_served(cache_dir):
     # 2026-10-09 (Fri) is a holiday, so Thursday's row is the newest one Monday
-    # can have. It stops before the previous weekday, so the table is treated
-    # as incomplete: fetched again after the TTL, and its rows are served.
+    # can have. Without a calendar it stops before the previous weekday, so the
+    # table is treated as incomplete: fetched again after the TTL, and served.
     today = dt.date(2026, 10, 12)
     holiday_table = _close_table("2026-10-08")
     calls = []
@@ -641,3 +653,57 @@ def test_the_day_after_a_weekday_holiday_is_fetched_again_and_served(cache_dir):
     _age(wrapper.cache_path(CLOSE, today), INCOMPLETE_CACHE_TTL_S + 1)
     assert wrapper.get_table(CLOSE, today).index.max() == pd.Timestamp("2026-10-08")
     assert calls == [CLOSE, CLOSE]
+
+
+def test_with_a_cached_calendar_the_day_after_a_holiday_is_complete(cache_dir):
+    _cache_calendar(cache_dir, 2026, ["2026-10-09", "2026-10-10"])
+    today = dt.date(2026, 10, 12)
+    assert expected_report_date(today) == dt.date(2026, 10, 8)
+    wrapper = FinLabWrapper(fetch=lambda name: _close_table("2026-10-08"))
+    wrapper.get_table(CLOSE, today)
+    _age(wrapper.cache_path(CLOSE, today), 10 * 3600)
+    later = _Recorder(_close_table("2026-10-08"))
+    assert FinLabWrapper(fetch=later).get_table(CLOSE, today).index.max() == pd.Timestamp("2026-10-08")
+    assert later.calls == []
+
+
+def test_expected_report_date_never_asks_the_network_for_the_calendar(cache_dir, monkeypatch):
+    from data_sdk.wrappers.market_calendar import MarketCalendar
+
+    requests_made = []
+
+    def no_http(url):
+        requests_made.append(url)
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(MarketCalendar, "_http_json", staticmethod(no_http))
+    assert expected_report_date(dt.date(2026, 10, 12)) == dt.date(2026, 10, 9)
+    assert requests_made == []
+    assert not (cache_dir / "market_calendar").exists()
+
+
+def test_a_failed_refetch_waits_for_the_ttl_before_trying_again(cache_dir):
+    today = dt.date(2026, 11, 6)
+    first = FinLabWrapper(fetch=lambda name: _close_table("2026-11-04"))
+    first.get_table(CLOSE, today)
+    _age(first.cache_path(CLOSE, today), INCOMPLETE_CACHE_TTL_S + 1)
+    attempts = []
+
+    def down(name):
+        attempts.append(name)
+        raise ConnectionError("down")
+
+    wrapper = FinLabWrapper(fetch=down)
+    wrapper.get_table(CLOSE, today)
+    wrapper.get_table(CLOSE, today)
+    assert attempts == [CLOSE]
+
+
+def test_a_cache_file_dated_in_the_future_counts_as_expired(cache_dir):
+    today = dt.date(2026, 11, 6)
+    first = FinLabWrapper(fetch=lambda name: _close_table("2026-11-04"))
+    first.get_table(CLOSE, today)
+    _age(first.cache_path(CLOSE, today), -3 * 86400)
+    later = _Recorder(_close_table("2026-11-05"))
+    assert FinLabWrapper(fetch=later).get_table(CLOSE, today).index.max() == pd.Timestamp("2026-11-05")
+    assert later.calls == [CLOSE]

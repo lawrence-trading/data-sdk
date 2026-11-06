@@ -27,12 +27,13 @@ rate and a market capitalisation.
 
 Cache: ``DATA_SDK_FINLAB_CACHE_PATH`` (default ``<user cache dir>/data_sdk/finlab_cache``),
 one parquet per ``(dataset, query day)`` holding the trailing rows dated
-before that day. A cached table whose last row reaches the previous weekday
-is complete and served for the rest of the day with no token. A cached table
-that stops earlier was fetched before FinLab published that day (an
-after-close run preparing the next trading day, or a late FinLab): it is
-served only while younger than ``INCOMPLETE_CACHE_TTL_S``, then fetched
-again. A cold fetch needs ``FINLAB_API_TOKEN`` and imports ``finlab`` lazily.
+before that day. A cached table whose last row reaches the last trading day
+before that day (``expected_report_date``) is complete and served for the rest
+of the day with no token. A cached table that stops earlier was fetched before
+FinLab published that day (an after-close run preparing the next trading day,
+or a late FinLab): it is served only while younger than
+``INCOMPLETE_CACHE_TTL_S``, then fetched again. A cold fetch needs
+``FINLAB_API_TOKEN`` and imports ``finlab`` lazily.
 """
 
 import datetime as dt
@@ -45,6 +46,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import pandas as pd
 
 from .local_cache import local_cache_dir
+from .market_calendar import MarketCalendar
 
 # 重訊公告 (material-information announcements), confirmed 2026-10-08:
 #   - finlab.data.search("重訊") and search("重大訊息") both resolve to exactly
@@ -149,17 +151,35 @@ def taipei_today() -> dt.date:
 def previous_weekday(today: dt.date) -> dt.date:
     """The last Monday-to-Friday date strictly before ``today``.
 
-    A complete daily table queried on ``today`` has a row for the last
-    trading day before it, and that day is never later than this one
-    (holidays only remove days; a weekend compensation trading day is later
-    still). A table reaching this date is therefore complete. A table that
-    stops earlier is either missing a day FinLab has not published yet, or
-    the days in between were holidays; both are treated as incomplete.
+    ``expected_report_date`` falls back to it when the market calendar is not
+    cached. The last trading day before ``today`` is never later than this
+    date (holidays only remove days), so a table reaching it is complete; a
+    table that stops earlier is either missing a day FinLab has not published
+    yet or follows a holiday, and both are treated as incomplete.
     """
     day = today - dt.timedelta(days=1)
     while day.weekday() >= 5:
         day -= dt.timedelta(days=1)
     return day
+
+
+def _calendar_offline(url: str) -> dict:
+    raise LookupError("the FinLab cache reads only a market calendar already cached on disk")
+
+
+def expected_report_date(today: dt.date) -> dt.date:
+    """The date of the newest row a complete daily table queried on ``today`` has.
+
+    The last TWSE trading day before ``today``, from data-sdk's market calendar
+    when the years involved are already cached on disk (this never asks the
+    network). Without them, ``previous_weekday(today)``, which is never earlier:
+    a complete table is then at worst fetched again after a holiday, and a table
+    missing a day is never taken as complete.
+    """
+    try:
+        return dt.date.fromisoformat(MarketCalendar(fetch_json=_calendar_offline).previous_trading_day(today))
+    except Exception:
+        return previous_weekday(today)
 
 
 def _reaches(frame: pd.DataFrame, day: dt.date) -> bool:
@@ -285,23 +305,25 @@ class FinLabWrapper:
         ``today`` defaults to the current Taipei date. The last
         ``CACHE_TRAILING_ROWS`` rows before ``today`` are cached per
         ``(dataset, today)``. A cached table whose last row reaches
-        ``previous_weekday(today)`` is served as is, with no token. A cached
-        table that stops earlier is served only while the file is younger
-        than ``INCOMPLETE_CACHE_TTL_S``; after that the table is fetched
-        again and the cache rewritten, and if that fetch fails the cached
-        rows are served and the failure logged. The index is a
+        ``expected_report_date(today)`` is served as is, with no token. A
+        cached table that stops earlier is served only while the file is
+        younger than ``INCOMPLETE_CACHE_TTL_S`` (a file dated in the future
+        counts as expired); after that the table is fetched again and the
+        cache rewritten. If that fetch fails, the cached rows are served, the
+        failure is logged and the file's age starts again. The index is a
         DatetimeIndex, columns are stock ids as str.
         """
         today = today or taipei_today()
         path = self.cache_path(dataset, today)
-        expected = previous_weekday(today)
+        expected = expected_report_date(today)
         cached = None
         if os.path.isfile(path) and os.path.getsize(path) > 0:
             cached = pd.read_parquet(path)
             cached.index = pd.to_datetime(cached.index)
             if _reaches(cached, expected):
                 return cached
-            if time.time() - os.path.getmtime(path) < INCOMPLETE_CACHE_TTL_S:
+            age_s = time.time() - os.path.getmtime(path)
+            if 0 <= age_s < INCOMPLETE_CACHE_TTL_S:
                 return cached
 
         try:
@@ -309,6 +331,12 @@ class FinLabWrapper:
         except Exception as exc:
             if cached is None:
                 raise
+            # The TTL starts again, so the calls that follow serve the cached
+            # rows instead of each waiting on another failed fetch.
+            try:
+                os.utime(path)
+            except OSError:
+                pass
             # Only the exception's type: a request error's text can carry the
             # request, and FinLab's requests carry the API token.
             logger.warning(
