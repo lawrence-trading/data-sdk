@@ -1,8 +1,10 @@
 """FinLabWrapper against synthetic tables: no finlab import, no token."""
 
 import datetime as dt
+import logging
 import os
 import sys
+import time
 
 import pandas as pd
 import pytest
@@ -12,11 +14,13 @@ from data_sdk.wrappers.finlab_wrapper import (
     COMPANY_BASIC_INFO_DATASET,
     DATASETS,
     DIVIDEND_ANNOUNCEMENT_DATASET,
+    INCOMPLETE_CACHE_TTL_S,
     MATERIAL_ANNOUNCEMENT_DATASET,
     TRADING_STATS_DATASETS,
     UNIVERSE_STATS_DATASETS,
     align_latest_rows,
     latest_before_today,
+    previous_weekday,
 )
 
 TODAY = dt.date(2026, 9, 17)
@@ -105,11 +109,15 @@ def test_cached_day_is_served_without_a_fetch_or_token(cache_dir):
     FinLabWrapper(fetch=fetch).get_ssf_reference(TODAY)
     assert len(calls) == len(DATASETS)
 
+    misses = []
+
     def refuse(name):
+        misses.append(name)
         raise AssertionError("cache miss on a warm day")
 
     assert "FINLAB_API_TOKEN" not in os.environ
     report_date, frame = FinLabWrapper(fetch=refuse).get_ssf_reference(TODAY)
+    assert misses == []
     assert report_date == dt.date(2026, 9, 16)
     assert frame.loc["2330", "margin_balance"] == 120
 
@@ -368,11 +376,15 @@ def test_trading_stats_warm_day_needs_no_fetch_or_token(cache_dir):
     tables = _stats_tables({"2330": [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000]})
     FinLabWrapper(fetch=lambda name: tables[name]).get_trading_stats(TODAY)
 
+    misses = []
+
     def refuse(name):
+        misses.append(name)
         raise AssertionError("cache miss on a warm day")
 
     assert "FINLAB_API_TOKEN" not in os.environ
     _, frame = FinLabWrapper(fetch=refuse).get_trading_stats(TODAY)
+    assert misses == []
     assert frame.loc["2330", "avg_volume_5d_shares"] == 5_000
 
 
@@ -493,11 +505,137 @@ def test_universe_stats_warm_day_needs_no_price_fetch_or_token(cache_dir):
     info = _basic_info([("2330", 100, "sii")])
     FinLabWrapper(fetch=_universe_fetch(_universe_tables(), info)).get_universe_stats(TODAY)
 
+    misses = []
+
     def only_the_company_table(name):
         if name != COMPANY_BASIC_INFO_DATASET:
+            misses.append(name)
             raise AssertionError("cache miss on a warm day")
         return info
 
     _, frame = FinLabWrapper(fetch=only_the_company_table).get_universe_stats(TODAY)
+    assert misses == []
 
     assert frame.loc["2330", "prev_close"] == 1_005.0
+
+
+# --- a cached table that stops before the previous weekday ------------------
+
+
+def _close_table(last_day):
+    """price:收盤價 for weekdays from 2026-09-28 to ``last_day``."""
+    days = pd.bdate_range("2026-09-28", last_day)
+    return _table(days, **{"2330": [1000.0 + i for i in range(len(days))]})
+
+
+def _age(path, seconds):
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
+
+
+class _Recorder:
+    """A fetch that records each dataset asked for and answers with ``table``."""
+
+    def __init__(self, table=None):
+        self.table = table
+        self.calls = []
+
+    def __call__(self, name):
+        self.calls.append(name)
+        if self.table is None:
+            raise AssertionError(f"{name} was fetched")
+        return self.table
+
+
+def test_previous_weekday_skips_the_weekend():
+    assert previous_weekday(dt.date(2026, 11, 6)) == dt.date(2026, 11, 5)
+    assert previous_weekday(dt.date(2026, 11, 7)) == dt.date(2026, 11, 6)
+    assert previous_weekday(dt.date(2026, 11, 8)) == dt.date(2026, 11, 6)
+    assert previous_weekday(dt.date(2026, 11, 9)) == dt.date(2026, 11, 6)
+
+
+def test_an_after_close_fetch_for_the_next_day_does_not_pin_that_day(cache_dir):
+    # 11-05 14:25: a deploy prepares 11-06 before FinLab has 11-05's closes.
+    today = dt.date(2026, 11, 6)
+    early = FinLabWrapper(fetch=lambda name: _close_table("2026-11-04"))
+    assert early.get_table(CLOSE, today).index.max() == pd.Timestamp("2026-11-04")
+    path = early.cache_path(CLOSE, today)
+    _age(path, INCOMPLETE_CACHE_TTL_S + 1)
+
+    calls = []
+
+    def fetch(name):
+        calls.append(name)
+        return _close_table("2026-11-05")
+
+    assert FinLabWrapper(fetch=fetch).get_table(CLOSE, today).index.max() == pd.Timestamp("2026-11-05")
+    assert calls == [CLOSE]
+    # The rewritten file is complete and serves the rest of the day.
+    _age(path, 10 * 3600)
+    later = _Recorder(_close_table("2026-11-05"))
+    assert FinLabWrapper(fetch=later).get_table(CLOSE, today).index.max() == pd.Timestamp("2026-11-05")
+    assert later.calls == []
+
+
+def test_an_incomplete_cached_table_is_shared_within_the_ttl(cache_dir):
+    today = dt.date(2026, 11, 6)
+    FinLabWrapper(fetch=lambda name: _close_table("2026-11-04")).get_table(CLOSE, today)
+    second = _Recorder(_close_table("2026-11-05"))
+    assert FinLabWrapper(fetch=second).get_table(CLOSE, today).index.max() == pd.Timestamp("2026-11-04")
+    assert second.calls == []
+
+
+def test_a_failed_refetch_serves_the_cached_rows_and_logs_it(cache_dir, caplog):
+    today = dt.date(2026, 11, 6)
+    first = FinLabWrapper(fetch=lambda name: _close_table("2026-11-04"))
+    first.get_table(CLOSE, today)
+    _age(first.cache_path(CLOSE, today), INCOMPLETE_CACHE_TTL_S + 1)
+    attempts = []
+
+    def down(name):
+        attempts.append(name)
+        raise RuntimeError("network down")
+
+    with caplog.at_level(logging.WARNING):
+        table = FinLabWrapper(fetch=down).get_table(CLOSE, today)
+    assert attempts == [CLOSE]
+    assert table.index.max() == pd.Timestamp("2026-11-04")
+    assert "network down" in caplog.text
+    assert "2026-11-04" in caplog.text
+
+
+def test_a_failed_cold_fetch_still_raises(cache_dir):
+    def down(name):
+        raise RuntimeError("network down")
+
+    with pytest.raises(RuntimeError, match="network down"):
+        FinLabWrapper(fetch=down).get_table(CLOSE, dt.date(2026, 11, 6))
+
+
+def test_fridays_row_is_complete_for_monday(cache_dir):
+    today = dt.date(2026, 11, 9)
+    wrapper = FinLabWrapper(fetch=lambda name: _close_table("2026-11-06"))
+    wrapper.get_table(CLOSE, today)
+    _age(wrapper.cache_path(CLOSE, today), 10 * 3600)
+    later = _Recorder(_close_table("2026-11-06"))
+    assert FinLabWrapper(fetch=later).get_table(CLOSE, today).index.max() == pd.Timestamp("2026-11-06")
+    assert later.calls == []
+
+
+def test_the_day_after_a_weekday_holiday_is_fetched_again_and_served(cache_dir):
+    # 2026-10-09 (Fri) is a holiday, so Thursday's row is the newest one Monday
+    # can have. It stops before the previous weekday, so the table is treated
+    # as incomplete: fetched again after the TTL, and its rows are served.
+    today = dt.date(2026, 10, 12)
+    holiday_table = _close_table("2026-10-08")
+    calls = []
+
+    def fetch(name):
+        calls.append(name)
+        return holiday_table
+
+    wrapper = FinLabWrapper(fetch=fetch)
+    assert wrapper.get_table(CLOSE, today).index.max() == pd.Timestamp("2026-10-08")
+    _age(wrapper.cache_path(CLOSE, today), INCOMPLETE_CACHE_TTL_S + 1)
+    assert wrapper.get_table(CLOSE, today).index.max() == pd.Timestamp("2026-10-08")
+    assert calls == [CLOSE, CLOSE]

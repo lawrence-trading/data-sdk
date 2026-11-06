@@ -27,13 +27,19 @@ rate and a market capitalisation.
 
 Cache: ``DATA_SDK_FINLAB_CACHE_PATH`` (default ``<user cache dir>/data_sdk/finlab_cache``),
 one parquet per ``(dataset, query day)`` holding the trailing rows dated
-before that day. A warm read needs no token; a cold fetch needs
-``FINLAB_API_TOKEN`` and imports ``finlab`` lazily.
+before that day. A cached table whose last row reaches the previous weekday
+is complete and served for the rest of the day with no token. A cached table
+that stops earlier was fetched before FinLab published that day (an
+after-close run preparing the next trading day, or a late FinLab): it is
+served only while younger than ``INCOMPLETE_CACHE_TTL_S``, then fetched
+again. A cold fetch needs ``FINLAB_API_TOKEN`` and imports ``finlab`` lazily.
 """
 
 import datetime as dt
+import logging
 import os
 import tempfile
+import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -120,8 +126,16 @@ VOLUME_MIN_DAYS = 3
 # completed trading day in the cache, small enough to be a few KB per stock.
 CACHE_TRAILING_ROWS = 10
 
+# How long a cached table that stops before the previous weekday is served
+# before it is fetched again. Short enough that a run after FinLab publishes
+# gets that day; long enough that the several pulls of one deploy or one
+# reference refresh share a single download.
+INCOMPLETE_CACHE_TTL_S = 600
+
 # FinLab's 借券賣出餘額 is in shares; one 張 is 1000 shares.
 SHARES_PER_LOT = 1000
+
+logger = logging.getLogger(__name__)
 
 
 class FinLabAlignmentError(RuntimeError):
@@ -130,6 +144,32 @@ class FinLabAlignmentError(RuntimeError):
 
 def taipei_today() -> dt.date:
     return dt.datetime.now(TAIPEI).date()
+
+
+def previous_weekday(today: dt.date) -> dt.date:
+    """The last Monday-to-Friday date strictly before ``today``.
+
+    A complete daily table queried on ``today`` has a row for the last
+    trading day before it, and that day is never later than this one
+    (holidays only remove days; a weekend compensation trading day is later
+    still). A table reaching this date is therefore complete. A table that
+    stops earlier is either missing a day FinLab has not published yet, or
+    the days in between were holidays; both are treated as incomplete.
+    """
+    day = today - dt.timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= dt.timedelta(days=1)
+    return day
+
+
+def _reaches(frame: pd.DataFrame, day: dt.date) -> bool:
+    """True when ``frame`` has a row dated ``day`` or later."""
+    return not frame.empty and pd.Timestamp(frame.index.max()).date() >= day
+
+
+def _last_date(frame: pd.DataFrame) -> str:
+    """The date of ``frame``'s last row as ``YYYY-MM-DD``, or ``none`` when empty."""
+    return "none" if frame.empty else pd.Timestamp(frame.index.max()).date().isoformat()
 
 
 def latest_before_today(frame: pd.DataFrame, today: dt.date) -> Tuple[dt.date, pd.Series]:
@@ -242,27 +282,52 @@ class FinLabWrapper:
     def get_table(self, dataset: str, today: Optional[dt.date] = None) -> pd.DataFrame:
         """Trailing rows of ``dataset`` dated strictly before ``today``.
 
-        ``today`` defaults to the current Taipei date. A cached parquet for
-        ``(dataset, today)`` is served as is, with no token; otherwise the
-        table is fetched, the last ``CACHE_TRAILING_ROWS`` rows before
-        ``today`` are cached, and those rows are returned. The index is a
+        ``today`` defaults to the current Taipei date. The last
+        ``CACHE_TRAILING_ROWS`` rows before ``today`` are cached per
+        ``(dataset, today)``. A cached table whose last row reaches
+        ``previous_weekday(today)`` is served as is, with no token. A cached
+        table that stops earlier is served only while the file is younger
+        than ``INCOMPLETE_CACHE_TTL_S``; after that the table is fetched
+        again and the cache rewritten, and if that fetch fails the cached
+        rows are served and the failure logged. The index is a
         DatetimeIndex, columns are stock ids as str.
         """
         today = today or taipei_today()
         path = self.cache_path(dataset, today)
+        expected = previous_weekday(today)
+        cached = None
         if os.path.isfile(path) and os.path.getsize(path) > 0:
-            frame = pd.read_parquet(path)
-            frame.index = pd.to_datetime(frame.index)
-            return frame
+            cached = pd.read_parquet(path)
+            cached.index = pd.to_datetime(cached.index)
+            if _reaches(cached, expected):
+                return cached
+            if time.time() - os.path.getmtime(path) < INCOMPLETE_CACHE_TTL_S:
+                return cached
+
+        try:
+            fetched = self._fetch_dataset(dataset)
+        except Exception as exc:
+            if cached is None:
+                raise
+            logger.warning(
+                "FinLab %s for %s: fetching again failed (%s); serving the cached rows, which end %s",
+                dataset, today.isoformat(), exc, _last_date(cached),
+            )
+            return cached
 
         # A plain DataFrame: finlab's FinlabDataFrame refuses an index
         # assignment (its lookahead-bias guard), and these daily tables need
         # nothing from its report-date semantics.
-        full = pd.DataFrame(self._fetch_dataset(dataset)).copy()
+        full = pd.DataFrame(fetched).copy()
         full.index = pd.to_datetime(full.index)
         full.columns = [str(c) for c in full.columns]
         trailing = full.loc[full.index < pd.Timestamp(today)].tail(CACHE_TRAILING_ROWS)
         self._write_atomic(trailing, path)
+        if not _reaches(trailing, expected):
+            logger.warning(
+                "FinLab %s for %s ends %s, before %s: cached for %d s only",
+                dataset, today.isoformat(), _last_date(trailing), expected.isoformat(), INCOMPLETE_CACHE_TTL_S,
+            )
         return trailing
 
     def get_ssf_reference(self, today: Optional[dt.date] = None) -> Tuple[dt.date, pd.DataFrame]:
