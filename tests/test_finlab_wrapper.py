@@ -594,14 +594,16 @@ def test_a_failed_refetch_serves_the_cached_rows_and_logs_it(cache_dir, caplog):
 
     def down(name):
         attempts.append(name)
-        raise RuntimeError("network down")
+        raise ConnectionError("POST https://api.example/data?api_token=SECRET-TOKEN failed")
 
     with caplog.at_level(logging.WARNING):
         table = FinLabWrapper(fetch=down).get_table(CLOSE, today)
     assert attempts == [CLOSE]
     assert table.index.max() == pd.Timestamp("2026-11-04")
-    assert "network down" in caplog.text
+    assert "ConnectionError" in caplog.text
     assert "2026-11-04" in caplog.text
+    # The exception text can carry the request and its token; it is never logged.
+    assert "SECRET-TOKEN" not in caplog.text
 
 
 def test_a_failed_cold_fetch_still_raises(cache_dir):

@@ -309,9 +309,11 @@ class FinLabWrapper:
         except Exception as exc:
             if cached is None:
                 raise
+            # Only the exception's type: a request error's text can carry the
+            # request, and FinLab's requests carry the API token.
             logger.warning(
                 "FinLab %s for %s: fetching again failed (%s); serving the cached rows, which end %s",
-                dataset, today.isoformat(), exc, _last_date(cached),
+                dataset, today.isoformat(), type(exc).__name__, _last_date(cached),
             )
             return cached
 
