@@ -136,13 +136,8 @@ finmind = FinMindWrapper()
 df = finmind.get_broker("2024-01-02", "2330")
 day = finmind.get_broker_day("2024-01-02", sids=["2330", "2317"])
 
-# Filling the archive (scheduled writer only): fetch exactly the missing
-# stocks, re-check anything the batch dropped, then dedup + atomic write.
-expected = finmind.get_traded_stock_ids("2024-01-02")
-missing = expected - finmind.archived_stock_ids("2024-01-02")
-result = finmind.fetch_broker_cells("2024-01-02", missing)
-if result.complete:
-    finmind.write_broker_day("2024-01-02", result.frame)
+# Filling the archive is not part of this SDK: the scheduled writer lives in
+# sysadmin-utils (finmind_wrapper/broker_writer.py) and runs as galileo.
 
 # Warrant branch report (TaiwanStockWarrantTradingDailyReport, from 2023-06-21):
 # same layout and columns, one file per day under DATA_SDK_FINMIND_BROKER_WARRANT_PATH.
@@ -150,12 +145,6 @@ if result.complete:
 wide = finmind.get_broker("2026-08-06", sid="700448", warrant=True)      # one warrant, every branch
 desk = finmind.get_broker("2026-08-06", trader_id="9227", warrant=True)  # one branch, every warrant
 day  = finmind.get_broker_day("2026-08-06", warrant=True)
-
-# Filling it: the sponsor-tier whole-day storage object, one request per day,
-# accepted only when it is dated, not thin, and covers the warrants that traded.
-result = finmind.fetch_warrant_day("2026-08-06")
-if result.complete:
-    finmind.write_broker_day("2026-08-06", result.frame, warrant=True)
 
 
 # Get Shioaji order book data (downloads if missing)
