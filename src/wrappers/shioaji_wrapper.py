@@ -1,3 +1,4 @@
+import inspect
 import os
 import tempfile
 import time
@@ -8,10 +9,17 @@ from pathlib import Path
 
 from .paths import env_path
 
+# Shioaji 1.5's login() downloads the contract file and takes
+# contracts_timeout. Shioaji 1.7's login() takes no contract arguments:
+# contracts load through api.contracts.preload, and api.Contracts has no
+# fetch status.
+_LOGIN_DOWNLOADS_CONTRACTS = "contracts_timeout" in inspect.signature(sj.Shioaji.login).parameters
+
+
 class ShioajiWrapper:
     _api = None
     _ref_count = 0
-    # Max wait for Shioaji's contract-file download, in seconds.
+    # Max wait for Shioaji's contract download, in seconds.
     _CONTRACTS_FETCH_TIMEOUT_S = 60
 
     def __init__(self):
@@ -34,12 +42,15 @@ class ShioajiWrapper:
         # "Token doesn't have production permission". NB: were this wrapper
         # ever to place real orders, they would route to the paper endpoint.
         api = sj.Shioaji(simulation=True)
+        contract_kwargs = {}
+        if _LOGIN_DOWNLOADS_CONTRACTS:
+            # login() takes milliseconds; block until the contract file
+            # is downloaded instead of returning immediately (default 0).
+            contract_kwargs["contracts_timeout"] = cls._CONTRACTS_FETCH_TIMEOUT_S * 1000
         api.login(
             api_key=os.environ.get("SHIOAJI_API_KEY"),
             secret_key=os.environ.get("SHIOAJI_SECRET_KEY"),
-            # login() takes milliseconds; block until the contract file
-            # is downloaded instead of returning immediately (default 0).
-            contracts_timeout=cls._CONTRACTS_FETCH_TIMEOUT_S * 1000,
+            **contract_kwargs,
         )
         # Publish only once login has returned. Binding a never-logged-in
         # client here would make every later call skip login and reuse a dead
@@ -63,17 +74,29 @@ class ShioajiWrapper:
             ShioajiWrapper._api = None
 
     def _ensure_contracts_fetched(self):
-        """Block until Shioaji's contract file is downloaded.
+        """Block until the stock and futures contracts are loaded.
 
-        login() waits up to contracts_timeout for the download but may return
-        with it still incomplete (it does not raise on timeout), and iterating
-        or indexing Contracts before then sees a partial/empty set. Poll
-        Contracts.status until Fetched; raise if it never completes.
+        Shioaji 1.7: api.contracts.preload blocks until the stock and futures
+        datasets are in, and returns at once when they already are. It
+        raises Shioaji's own error, naming the cause, when they do not arrive
+        within the timeout.
+
+        Shioaji 1.5: login() waits up to contracts_timeout for the download
+        but may return with it still incomplete (it does not raise on
+        timeout), and iterating or indexing Contracts before then sees a
+        partial/empty set. Poll Contracts.status until Fetched; raise if it
+        never completes.
 
         Every method that needs the network funnels through here, so this is
         also where the lazy login happens.
         """
-        ShioajiWrapper._ensure_api()
+        api = ShioajiWrapper._ensure_api()
+        if not _LOGIN_DOWNLOADS_CONTRACTS:
+            api.contracts.preload(
+                security_types=[sj.SecurityType.Stock, sj.SecurityType.Futures],
+                timeout=ShioajiWrapper._CONTRACTS_FETCH_TIMEOUT_S * 1000,
+            )
+            return
         deadline = time.monotonic() + ShioajiWrapper._CONTRACTS_FETCH_TIMEOUT_S
         while ShioajiWrapper._api.Contracts.status != sj.FetchStatus.Fetched:
             if time.monotonic() >= deadline:
@@ -185,7 +208,8 @@ class ShioajiWrapper:
         Columns: code, symbol, name, category, delivery_month, delivery_date,
         underlying_kind, underlying_code, unit.
 
-        Shioaji downloads the live contract file at login, so this covers
+        Shioaji loads the live contract catalogue (Shioaji 1.5 at login,
+        Shioaji 1.7 through api.contracts.preload), so this covers
         currently-listed contracts only; expired or delisted contracts are
         absent.
         """
