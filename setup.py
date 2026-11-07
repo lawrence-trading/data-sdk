@@ -11,7 +11,7 @@ setup(
         "pandas",
         "polars",
         "FinMind",
-        "shioaji",
+        "shioaji>=1.7",
         "requests",
     ],
     author="User",
