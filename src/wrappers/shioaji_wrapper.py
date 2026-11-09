@@ -1,3 +1,4 @@
+import inspect
 import os
 import tempfile
 import time
@@ -48,13 +49,24 @@ class ShioajiWrapper:
                 cls._contracts_cache = tempfile.TemporaryDirectory(prefix="data-sdk-shioaji-contracts-")
             os.environ["SJ_CONTRACTS_PATH"] = cls._contracts_cache.name
         api = sj.Shioaji(simulation=True)
-        api.login(
+        timeout_ms = cls._CONTRACTS_FETCH_TIMEOUT_S * 1000
+        credentials = dict(
             api_key=os.environ.get("SHIOAJI_API_KEY"),
             secret_key=os.environ.get("SHIOAJI_SECRET_KEY"),
-            # login() takes milliseconds; block until the contract file
-            # is downloaded instead of returning immediately (default 0).
-            contracts_timeout=cls._CONTRACTS_FETCH_TIMEOUT_S * 1000,
         )
+        login_params = inspect.signature(api.login).parameters
+        takes_timeout = "contracts_timeout" in login_params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in login_params.values())
+        if takes_timeout:
+            # Shioaji before 1.7: login() downloads the contract file itself;
+            # contracts_timeout (milliseconds) makes it block until the file
+            # is there instead of returning immediately (default 0).
+            api.login(**credentials, contracts_timeout=timeout_ms)
+        else:
+            # Shioaji 1.7 and later: login() no longer fetches contracts, so
+            # the download is asked for explicitly, blocking the same way.
+            api.login(**credentials)
+            api.fetch_contracts(contract_download=True, contracts_timeout=timeout_ms)
         # Publish only once login has returned. Binding a never-logged-in
         # client here would make every later call skip login and reuse a dead
         # handle, turning one clear auth error into a 60s hang elsewhere.
@@ -79,7 +91,8 @@ class ShioajiWrapper:
     def _ensure_contracts_fetched(self):
         """Block until Shioaji's contract file is downloaded.
 
-        login() waits up to contracts_timeout for the download but may return
+        login() (before Shioaji 1.7) or fetch_contracts() (1.7 and later)
+        waits up to contracts_timeout for the download but may return
         with it still incomplete (it does not raise on timeout), and iterating
         or indexing Contracts before then sees a partial/empty set. Poll
         Contracts.status until Fetched; raise if it never completes.
