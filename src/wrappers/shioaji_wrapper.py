@@ -108,7 +108,9 @@ class ShioajiWrapper:
             # Shioaji 1.7 and later: Contracts has no download status; login()
             # has already loaded the file, so an empty container means the
             # download failed rather than that it is still running.
-            if len(contracts) == 0:
+            # 1.7's Contracts has no len() and is not iterable; its Stocks view
+            # iterates the exchange groups (TSE, OTC, OES), each of contracts.
+            if not any(next(iter(group), None) is not None for group in contracts.Stocks):
                 raise RuntimeError("Shioaji returned no contracts after login.")
             return
         deadline = time.monotonic() + ShioajiWrapper._CONTRACTS_FETCH_TIMEOUT_S

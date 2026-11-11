@@ -27,13 +27,10 @@ class _ClientBefore17:
 
 
 class _Contracts17:
-    """Shioaji 1.7's Contracts: no status attribute, a length."""
+    """Shioaji 1.7's Contracts: no status, no len(), not iterable; Stocks iterates exchange groups."""
 
     def __init__(self, n):
-        self.n = n
-
-    def __len__(self):
-        return self.n
+        self.Stocks = [["TSE"] * n, ["OTC"] * n, []]
 
 
 class _Client17:
