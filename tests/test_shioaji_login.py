@@ -2,7 +2,8 @@
 
 No network and no broker login: sj.Shioaji is replaced by a stand-in that records the calls.
 Before 1.7, login() takes contracts_timeout and downloads the contract file itself; from 1.7,
-login() has no such parameter and the download is asked for with fetch_contracts().
+login() has no such parameter, loads the contracts before it returns, and refuses a later
+fetch_contracts() on the same session; its Contracts has no status attribute.
 """
 import pytest
 import shioaji as sj
@@ -25,11 +26,23 @@ class _ClientBefore17:
         type(self).calls.append(("fetch_contracts", {"contract_download": contract_download}))
 
 
+class _Contracts17:
+    """Shioaji 1.7's Contracts: no status attribute, a length."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+
 class _Client17:
     calls = []
+    loaded = 3
 
     def __init__(self, simulation=False):
         self.simulation = simulation
+        self.Contracts = _Contracts17(type(self).loaded)
 
     def login(self, api_key, secret_key, subscribe_trade=True, receive_window=30000, force_refresh=False):
         type(self).calls.append(("login", {}))
@@ -58,16 +71,28 @@ def test_before_17_login_downloads_the_contracts(monkeypatch, fresh_wrapper):
         ("login", {"contracts_timeout": ShioajiWrapper._CONTRACTS_FETCH_TIMEOUT_S * 1000})]
 
 
-def test_17_logs_in_then_asks_for_the_contract_download(monkeypatch, fresh_wrapper):
+def test_17_logs_in_and_never_calls_fetch_contracts(monkeypatch, fresh_wrapper):
     _Client17.calls = []
     monkeypatch.setattr(sw.sj, "Shioaji", _Client17)
     api = ShioajiWrapper._ensure_api()
     assert isinstance(api, _Client17) and api.simulation is True
-    assert _Client17.calls == [
-        ("login", {}),
-        ("fetch_contracts", {"contract_download": True,
-                             "contracts_timeout": ShioajiWrapper._CONTRACTS_FETCH_TIMEOUT_S * 1000}),
-    ]
+    assert _Client17.calls == [("login", {})]
+
+
+def test_17_contracts_loaded_by_login_count_as_fetched(monkeypatch, fresh_wrapper):
+    _Client17.calls = []
+    monkeypatch.setattr(_Client17, "loaded", 3)
+    monkeypatch.setattr(sw.sj, "Shioaji", _Client17)
+    ShioajiWrapper()._ensure_contracts_fetched()
+    assert _Client17.calls == [("login", {})]
+
+
+def test_17_an_empty_contract_set_after_login_is_an_error(monkeypatch, fresh_wrapper):
+    _Client17.calls = []
+    monkeypatch.setattr(_Client17, "loaded", 0)
+    monkeypatch.setattr(sw.sj, "Shioaji", _Client17)
+    with pytest.raises(RuntimeError, match="no contracts"):
+        ShioajiWrapper()._ensure_contracts_fetched()
 
 
 def test_the_installed_shioaji_takes_one_of_the_two_shapes():

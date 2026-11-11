@@ -63,10 +63,12 @@ class ShioajiWrapper:
             # is there instead of returning immediately (default 0).
             api.login(**credentials, contracts_timeout=timeout_ms)
         else:
-            # Shioaji 1.7 and later: login() no longer fetches contracts, so
-            # the download is asked for explicitly, blocking the same way.
+            # Shioaji 1.7 and later: login() takes no contracts_timeout and
+            # loads the contract file itself before it returns; a further
+            # fetch_contracts() call on the same session is refused with
+            # "exclusive access lost (concurrent API call started)", so none
+            # is made. _ensure_contracts_fetched checks the result is not empty.
             api.login(**credentials)
-            api.fetch_contracts(contract_download=True, contracts_timeout=timeout_ms)
         # Publish only once login has returned. Binding a never-logged-in
         # client here would make every later call skip login and reuse a dead
         # handle, turning one clear auth error into a 60s hang elsewhere.
@@ -101,6 +103,14 @@ class ShioajiWrapper:
         also where the lazy login happens.
         """
         ShioajiWrapper._ensure_api()
+        contracts = ShioajiWrapper._api.Contracts
+        if not hasattr(contracts, "status"):
+            # Shioaji 1.7 and later: Contracts has no download status; login()
+            # has already loaded the file, so an empty container means the
+            # download failed rather than that it is still running.
+            if len(contracts) == 0:
+                raise RuntimeError("Shioaji returned no contracts after login.")
+            return
         deadline = time.monotonic() + ShioajiWrapper._CONTRACTS_FETCH_TIMEOUT_S
         while ShioajiWrapper._api.Contracts.status != sj.FetchStatus.Fetched:
             if time.monotonic() >= deadline:
