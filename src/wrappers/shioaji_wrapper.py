@@ -1,5 +1,6 @@
 import inspect
 import os
+import re
 import tempfile
 import time
 from decimal import Decimal, InvalidOperation
@@ -199,11 +200,62 @@ class ShioajiWrapper:
 
         return self._download_futures_ticks_to_parquet(day, code, dest_path, data_dir)
 
+    @staticmethod
+    def _slash_date(value):
+        """A contract date as ``YYYY/MM/DD`` text, whichever Shioaji wrote it.
+
+        Before 1.7 the fields are already ``YYYY/MM/DD`` strings; from 1.7 they
+        are ISO dates (``YYYY-MM-DD``, a ``date`` or its text). None and
+        anything that is not a date pass through unchanged.
+        """
+        if value is None:
+            return None
+        text = value.isoformat() if hasattr(value, "isoformat") else str(value)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text[:10]):
+            return text[:10].replace("-", "/")
+        return text
+
+    @staticmethod
+    def _contract_fields(contract, fields, *, futures: bool):
+        """One futures or option contract as a dict of ``fields``.
+
+        The column meanings are the ones Shioaji had before 1.7, on both API
+        shapes:
+
+        - ``category`` is the product root (1.7 names the attribute ``root``).
+        - ``symbol``: before 1.7 the contract's own attribute. From 1.7 the
+          attribute is gone; a futures contract gets ``<root><delivery_month>``
+          (a continuous alias such as ``CDFR1`` gets its own code, as before),
+          an option contract gets None.
+        - ``delivery_date`` and ``update_date`` are ``YYYY/MM/DD`` text.
+        - ``name`` and ``underlying_code`` are the vendor's text as delivered;
+          1.7 writes names as ``台積電期貨 202612`` (was ``台積電期貨12``), gives an
+          ETF underlying its listing code (``006205``, was ``006205S``) and an
+          index underlying an index code (``IX0001``, was empty).
+        - ``unit`` does not exist from 1.7 and reads None.
+        """
+        row = {f: getattr(contract, f, None) for f in fields}
+        root = getattr(contract, "root", None)
+        if "category" in row and row["category"] is None:
+            row["category"] = root
+        if "symbol" in row and row["symbol"] is None and futures and root:
+            code = str(row.get("code") or getattr(contract, "code", "") or "")
+            month = getattr(contract, "delivery_month", None)
+            if re.fullmatch(r"R\d", code[len(str(root)):]):
+                row["symbol"] = code
+            elif month:
+                row["symbol"] = f"{root}{month}"
+        for f in ("delivery_date", "update_date"):
+            if f in row:
+                row[f] = ShioajiWrapper._slash_date(row[f])
+        return row
+
     def get_futures_contracts(self) -> pd.DataFrame:
         """One row per listed futures contract.
 
         Columns: code, symbol, name, category, delivery_month, delivery_date,
-        underlying_kind, underlying_code, unit.
+        underlying_kind, underlying_code, unit; ``_contract_fields`` says what
+        each holds on Shioaji before and from 1.7.
 
         Shioaji downloads the live contract file at login, so this covers
         currently-listed contracts only; expired or delisted contracts are
@@ -216,7 +268,7 @@ class ShioajiWrapper:
         rows = []
         for product in ShioajiWrapper._api.Contracts.Futures:
             for contract in product:
-                rows.append({f: getattr(contract, f, None) for f in fields})
+                rows.append(self._contract_fields(contract, fields, futures=True))
         return pd.DataFrame(rows, columns=fields)
 
     @staticmethod
@@ -283,7 +335,7 @@ class ShioajiWrapper:
         rows = []
         for product in ShioajiWrapper._api.Contracts.Options:
             for contract in product:
-                rows.append({f: getattr(contract, f, None) for f in fields})
+                rows.append(self._contract_fields(contract, fields, futures=False))
         df = pd.DataFrame(rows, columns=fields)
         # pandas.array(..., dtype="Int64") (nullable) rather than a plain
         # column assignment: a column mixing real integers with a missing

@@ -210,11 +210,13 @@ def test_option_contract_model_carries_the_fields_this_wrapper_reads():
     Option/Contract class -- checked against the installed package, not
     assumed (docs/tasks/42 §4.1's "point at a live object, don't guess")."""
     exposed = set(dir(sj.Option))
-    read_fields = {"code", "symbol", "name", "category", "delivery_month",
+    read_fields = {"code", "name", "delivery_month",
                    "delivery_date", "strike_price", "option_right",
-                   "underlying_kind", "underlying_code", "unit", "multiplier",
+                   "underlying_kind", "underlying_code", "multiplier",
                    "update_date"}
     assert read_fields <= exposed
+    # The product root is ``category`` before Shioaji 1.7 and ``root`` from it.
+    assert {"category", "root"} & exposed
 
 
 @pytest.mark.integration
