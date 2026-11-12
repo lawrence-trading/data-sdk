@@ -158,6 +158,29 @@ def events_from_tej(tej: pd.DataFrame, dim_warrant: pd.DataFrame) -> pd.DataFram
     return events
 
 
+# (event_type, published table, pending table, effective date, strike, cap, floor)
+MOPS_STRIKE_SOURCES = [
+    (
+        'adjustment',
+        'warrant_strike_ratio_adjustment',
+        'warrant_pending_adjustment',
+        'adjustment_effective_date',
+        'latest_strike',
+        'latest_cap',
+        'latest_floor',
+    ),
+    (
+        'reset',
+        'warrant_strike_ratio_reset',
+        'warrant_pending_reset',
+        'reset_effective_date',
+        'reset_strike',
+        'reset_cap',
+        'reset_floor',
+    ),
+]
+
+
 def events_from_mops_strike(
     cache_directory: Path,
     seed_end_date: pd.Timestamp,
@@ -168,55 +191,43 @@ def events_from_mops_strike(
     extendable ones, MOPS-only listings), whose only strike history is here.
     """
     frames = []
-    # Announced but not yet in force rows carry their own 生效日, which is what
-    # keeps the change off the days before it (see the resource's docstring).
-    adjustment_tables = [
-        table
-        for table in (
-            load_raw_table(cache_directory, 'warrant_strike_ratio_adjustment'),
-            load_raw_table(cache_directory, 'warrant_pending_adjustment'),
-        )
-        if table is not None
-    ]
-    adjustment = pd.concat(adjustment_tables, ignore_index=True) if adjustment_tables else None
-    if adjustment is not None and len(adjustment):
-        adjustment = add_warrant_key(adjustment, 'warrant_id', 'warrant_name')
+    for (
+        event_type,
+        published,
+        pending,
+        date_column,
+        strike_column,
+        cap_column,
+        floor_column,
+    ) in MOPS_STRIKE_SOURCES:
+        # Announced but not yet in force rows carry their own 生效日, which is
+        # what keeps the change off the days before it (see the resource's docstring).
+        tables = [
+            table
+            for table in (
+                load_raw_table(cache_directory, published),
+                load_raw_table(cache_directory, pending),
+            )
+            if table is not None
+        ]
+        if not tables:
+            continue
+        rows = pd.concat(tables, ignore_index=True)
+        if not len(rows):
+            continue
+        rows = add_warrant_key(rows, 'warrant_id', 'warrant_name')
         frames.append(pd.DataFrame({
-            'warrant_id': adjustment['warrant_id'],
-            'warrant_name': adjustment['warrant_name'],
-            'effective_date': adjustment['adjustment_effective_date'],
+            'warrant_id': rows['warrant_id'],
+            'warrant_name': rows['warrant_name'],
+            'effective_date': rows[date_column],
             'sequence': 1,
-            'strike': adjustment['latest_strike'],
-            'ratio': adjustment['latest_ratio'],
-            'cap': adjustment.get('latest_cap'),
-            'floor': adjustment.get('latest_floor'),
-            'target_stock_id': adjustment['target_stock_id'],
-            'target_name': adjustment['target_name'],
-            'event_type': 'adjustment',
-        }))
-    reset_tables = [
-        table
-        for table in (
-            load_raw_table(cache_directory, 'warrant_strike_ratio_reset'),
-            load_raw_table(cache_directory, 'warrant_pending_reset'),
-        )
-        if table is not None
-    ]
-    reset = pd.concat(reset_tables, ignore_index=True) if reset_tables else None
-    if reset is not None and len(reset):
-        reset = add_warrant_key(reset, 'warrant_id', 'warrant_name')
-        frames.append(pd.DataFrame({
-            'warrant_id': reset['warrant_id'],
-            'warrant_name': reset['warrant_name'],
-            'effective_date': reset['reset_effective_date'],
-            'sequence': 1,
-            'strike': reset['reset_strike'],
-            'ratio': reset['latest_ratio'],
-            'cap': reset.get('reset_cap'),
-            'floor': reset.get('reset_floor'),
-            'target_stock_id': reset['target_stock_id'],
-            'target_name': reset['target_name'],
-            'event_type': 'reset',
+            'strike': rows[strike_column],
+            'ratio': rows['latest_ratio'],
+            'cap': rows.get(cap_column),
+            'floor': rows.get(floor_column),
+            'target_stock_id': rows['target_stock_id'],
+            'target_name': rows['target_name'],
+            'event_type': event_type,
         }))
     if not frames:
         return empty_events()

@@ -9,6 +9,12 @@
   tables exactly as the builders do. A missing required table still raises
   `FileNotFoundError`.
 
+### Fold the MOPS adjustment and reset readers into one loop
+
+- `events_from_mops_strike()` handled adjustments and resets with two
+  near-identical blocks that differed only in table and column names. They
+  now run through one loop over `MOPS_STRIKE_SOURCES`.
+
 ### Read the TEJ adjustment seed once
 
 - `build_history()` now reads the TEJ adjustment parquet once, takes the
