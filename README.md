@@ -93,6 +93,8 @@ export DATA_SDK_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/parquets"
 export DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/tej_parquets"
 export DATA_SDK_TEJ_CACHE_PATH="/mnt/nfs/backup/tej_cache"
 export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"
+export DATA_SDK_WARRANT_CACHE_PATH="/mnt/nfs/backup/warrant_history"
+export DATA_SDK_TEJ_WARRANTS_PATH="/mnt/nfs/backup/tej_warrants"
 ```
 
 ### API Keys

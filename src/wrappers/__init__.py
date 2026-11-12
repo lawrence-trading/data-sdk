@@ -1,5 +1,6 @@
 from .finmind_broker_wrapper import FinMindWrapper
 from .shioaji_wrapper import ShioajiWrapper
+from .warrant_info_wrapper import WarrantInfoWrapper
 from .order_book_wrapper import (
     get_order_book_stocks,
     get_order_book_odd_lots,
@@ -17,4 +18,5 @@ __all__ = [
     "get_fop_parquet",
     "get_fop_order_book",
     "TEJWrapper",
+    "WarrantInfoWrapper",
 ]

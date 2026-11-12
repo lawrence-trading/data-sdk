@@ -5,3 +5,8 @@ polars
 FinMind
 shioaji>=1.7
 requests
+tejapi
+dlt
+beautifulsoup4
+lxml
+pyarrow
