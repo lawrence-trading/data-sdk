@@ -2,27 +2,27 @@
 
 ## 2026-11-12
 
-### Share one raw-table loader between build and validate
+### Share one raw-table loader between build and validate (`fd56a74`)
 
 - `validate.py` now reads raw tables through `load_raw_table()` instead of
   its own copy of the same glob/concat/clean logic, so validation sees the
   tables exactly as the builders do. A missing required table still raises
   `FileNotFoundError`.
 
-### Fold the MOPS adjustment and reset readers into one loop
+### Fold the MOPS adjustment and reset readers into one loop (`e14a5d7`)
 
 - `events_from_mops_strike()` handled adjustments and resets with two
   near-identical blocks that differed only in table and column names. They
   now run through one loop over `MOPS_STRIKE_SOURCES`.
 
-### Read the TEJ adjustment seed once
+### Read the TEJ adjustment seed once (`a081c97`)
 
 - `build_history()` now reads the TEJ adjustment parquet once, takes the
   seed end date from its raw `年月日`, and passes the frame to
   `events_from_tej()`. Previously the file was read a second time just to
   obtain that date.
 
-### Reuse the snapshot within a history build
+### Reuse the snapshot within a history build (`4a548ba`)
 
 - Read `warrant_active_snapshot` once in `build_history()` and share its
   crawl date between snapshot differences and target closure. Previously,
