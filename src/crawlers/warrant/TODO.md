@@ -1,5 +1,44 @@
 # Warrant crawler TODO
 
+## Proposal: daily 07:30 OpenAPI snapshots for new data
+
+Evaluate replacing the ongoing MOPS event / active-snapshot / diff pipeline
+with a full TWSE + TPEx OpenAPI capture every day at 07:30 Asia/Taipei.
+This is a proposal only; do not remove existing logic until the conditions
+below are resolved. Preserve all existing historical data at the cutover.
+
+Preferred starting point: keep MOPS for basic metadata missing from OpenAPI,
+and use OpenAPI for daily current terms. Consider dropping MOPS entirely only
+after a field-by-field coverage audit proves it unnecessary. The currently
+used endpoints are `t187ap37_L` (TWSE) and `mopsfin_t187ap37_O` (TPEx).
+
+- Archive the full daily response and normalized daily states, one row per
+  warrant incarnation per observation date. This avoids reconstructing new
+  events through snapshot diffs; retaining an event-only SCD2 output would
+  still require change detection. Coordinate with the same-day redesign below.
+- Audit every required field: latest strike, allocation ratio (per 1000
+  units), expiry, last trading day, original strike, cap/floor, exercise start,
+  listing date, issuer, underlying code/name, market and exercise style.
+  Current response samples contain most price/date fields but no dedicated
+  listing-date, issuer or underlying-code fields. Exercise start is not a
+  substitute for listing date for European-style warrants.
+- Verify publication timing around 07:30, including adjustment/reset days,
+  new listings, holidays and corrections. Store fetch time and source report
+  date separately. A successful fetch does not establish same-day freshness:
+  samples fetched on 2026-11-13 had first-row report dates of 2026-11-11
+  (TWSE) and 2026-11-12 (TPEx). Check all rows/markets, not just the first row.
+- Define the new history as observed daily state unless actual effective
+  dates are independently available. Do not infer adjustment vs reset or
+  backdate changes merely from the capture date. Missing days cannot be
+  reconstructed from a later current-state snapshot alone.
+- Define retries, stale/partial response handling, new-warrant metadata
+  enrichment, and disappearance/expiry handling; absence from a response
+  alone must not establish termination. Preserve the last successful archive.
+- Compare both pipelines before cutover, including listing resets,
+  ex-dividend adjustments, early termination and underlying conversions.
+  The existing OpenAPI verifier compares only four terms on matched warrants;
+  it does not prove complete universe or metadata coverage.
+
 ## Align directory defaults with the other SDK components
 
 Make warrant directory resolution follow the same rules as
