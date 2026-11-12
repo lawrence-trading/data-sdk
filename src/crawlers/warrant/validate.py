@@ -19,28 +19,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
 from pathlib import Path
 
 import pandas as pd
 
 from . import DEFAULT_CACHE_PATH, cache_directory as cache_dir
-from .build_basic_info import WARRANT_KEY, add_warrant_key
+from .build_basic_info import WARRANT_KEY, add_warrant_key, load_raw_table
 
 RAW_WARRANT_KEY = ['warrant_id', 'exercise_end_date']
 
 
-def load_table(cache_directory: Path, table_name: str) -> pd.DataFrame:
-    files = sorted(glob.glob(str(cache_directory / 'mops_raw' / 'mops_raw' / table_name / '*.parquet')))
-    if not files:
+def require_raw_table(cache_directory: Path, table_name: str) -> pd.DataFrame:
+    frame = load_raw_table(cache_directory, table_name)
+    if frame is None:
         raise FileNotFoundError(f'no parquet files for {table_name} under {cache_directory}')
-    # diagonal concat: tolerate schema drift in tables written before column
-    # type hints were added (see column_type_hints in warrant_reports.py).
-    frame = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
-    frame = frame.replace({'nan': None})
-    for column in frame.columns:
-        if column.endswith('_date'):
-            frame[column] = pd.to_datetime(frame[column])
     return frame
 
 
@@ -254,7 +246,7 @@ def check_curated_layer(cache_directory: Path) -> None:
     # refreshes it from the snapshot), or every warrant on the new code is
     # invisible to a join on the underlying's quotes.
     try:
-        snapshot = add_warrant_key(load_table(cache_directory, 'warrant_active_snapshot'), 'warrant_id', 'warrant_name')
+        snapshot = add_warrant_key(require_raw_table(cache_directory, 'warrant_active_snapshot'), 'warrant_id', 'warrant_name')
     except FileNotFoundError:
         print('  [SKIP] dim underlying == snapshot: no warrant_active_snapshot')
         return
@@ -282,11 +274,11 @@ def main() -> None:
 
     # Same dedup as build_basic_info: re-swept 到期日 windows append the same
     # expired rows again, which is expected, not a defect.
-    basic_info = load_table(cache_directory, 'warrant_basic_info').drop_duplicates(
+    basic_info = require_raw_table(cache_directory, 'warrant_basic_info').drop_duplicates(
         subset=RAW_WARRANT_KEY, keep='last'
     )
-    adjustment = load_table(cache_directory, 'warrant_strike_ratio_adjustment')
-    reset = load_table(cache_directory, 'warrant_strike_ratio_reset')
+    adjustment = require_raw_table(cache_directory, 'warrant_strike_ratio_adjustment')
+    reset = require_raw_table(cache_directory, 'warrant_strike_ratio_reset')
     print(f'basic_info {basic_info.shape[0]:,} rows | adjustment {adjustment.shape[0]:,} rows'
           f' | reset {reset.shape[0]:,} rows')
 

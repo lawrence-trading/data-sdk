@@ -2,6 +2,13 @@
 
 ## 2026-11-12
 
+### Share one raw-table loader between build and validate
+
+- `validate.py` now reads raw tables through `load_raw_table()` instead of
+  its own copy of the same glob/concat/clean logic, so validation sees the
+  tables exactly as the builders do. A missing required table still raises
+  `FileNotFoundError`.
+
 ### Read the TEJ adjustment seed once
 
 - `build_history()` now reads the TEJ adjustment parquet once, takes the
