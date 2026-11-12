@@ -428,7 +428,8 @@ def events_from_dim(
 # exchange applies on the ex-date), plus t95sb02's future-effective rows for
 # the true dates; MOPS's snapshot becomes verify's reference instead.
 def events_from_snapshot_diff(
-    cache_directory: Path,
+    snapshot: pd.DataFrame | None,
+    crawl_date: pd.Timestamp,
     dim_warrant: pd.DataFrame,
     events: pd.DataFrame,
     scheduled_expiry: pd.DataFrame,
@@ -440,12 +441,10 @@ def events_from_snapshot_diff(
     but not when they changed, so the event is dated at the crawl: the change is
     recorded no later than it actually happened, and never invented earlier.
     """
-    snapshot = load_raw_table(cache_directory, 'warrant_active_snapshot')
     if snapshot is None:
         return empty_events()
 
     snapshot = add_warrant_key(snapshot, 'warrant_id', 'warrant_name')
-    crawl_date = pd.to_datetime(snapshot['crawl_date']).max()
     current_terms = snapshot[
         WARRANT_KEY + ['latest_strike', 'alloc_qty_per_1k', 'exercise_end_date', 'last_trade_date']
     ]
@@ -801,13 +800,13 @@ def build_history(cache_directory: Path, dim_warrant: pd.DataFrame) -> pd.DataFr
     covered_keys = set(zip(events.loc[is_issuance, 'warrant_id'], events.loc[is_issuance, 'warrant_name']))
     events = pd.concat([events, events_from_dim(dim_warrant, covered_keys, events)], ignore_index=True)
     scheduled_expiry = scheduled_expiry_dates(cache_directory, dim_warrant)
-    events = pd.concat(
-        [events, events_from_snapshot_diff(cache_directory, dim_warrant, events, scheduled_expiry)],
-        ignore_index=True,
-    )
     snapshot = load_raw_table(cache_directory, 'warrant_active_snapshot')
     crawl_date = (
         pd.to_datetime(snapshot['crawl_date']).max() if snapshot is not None else pd.Timestamp(taiwan_today())
+    )
+    events = pd.concat(
+        [events, events_from_snapshot_diff(snapshot, crawl_date, dim_warrant, events, scheduled_expiry)],
+        ignore_index=True,
     )
     events = pd.concat(
         [events, events_from_target_closure(dim_warrant, events, crawl_date)], ignore_index=True

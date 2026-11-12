@@ -1,5 +1,13 @@
 # Warrant crawler changelog
 
+## 2026-11-12
+
+### Reuse the snapshot within a history build
+
+- Read `warrant_active_snapshot` once in `build_history()` and share its
+  crawl date between snapshot differences and target closure. Previously,
+  the entire snapshot was read and cleaned again just to obtain that date.
+
 ## 2026-11-04
 
 ### Track underlying conversions as event-time state (`09f1386`)
