@@ -2,6 +2,16 @@
 
 ## 2026-11-12
 
+### Define source precedence in one place
+
+- Each `events_from_*()` set its own hard-coded `source_rank`, so the full
+  same-moment precedence was spread over six functions and the comment in
+  `chain_events()` had fallen behind (it stopped at MOPS). The ranks now
+  live in `SOURCE_RANK` and are mapped from `source` once before
+  `chain_events()`; an unlisted source raises instead of sorting as NaN.
+- The column now leaves the build as `int64` rather than `object`; the
+  written parquet was `int64` before and is unchanged.
+
 ### Share one raw-table loader between build and validate (`fd56a74`)
 
 - `validate.py` now reads raw tables through `load_raw_table()` instead of

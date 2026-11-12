@@ -94,6 +94,18 @@ EVENT_COLUMNS = WARRANT_KEY + ['effective_date', 'sequence'] + STATE_COLUMNS + [
 ]
 
 
+# Same-moment precedence: on a shared (effective_date, sequence) the lower
+# rank wins (see chain_events).
+SOURCE_RANK = {
+    'tej': 1,
+    'mops_announcement': 2,
+    'mops_strike': 3,
+    'dim_synthesised': 4,
+    'mops_snapshot': 5,
+    'dim_closure': 5,
+}
+
+
 def empty_events() -> pd.DataFrame:
     return pd.DataFrame(columns=EVENT_COLUMNS)
 
@@ -152,7 +164,6 @@ def events_from_tej(tej: pd.DataFrame, dim_warrant: pd.DataFrame) -> pd.DataFram
         'event_type': tej['事件說明'].map({'上市櫃': 'issuance'}).fillna('change'),
     })
     events['source'] = 'tej'
-    events['source_rank'] = 1
     is_issuance = events['event_type'] == 'issuance'
     print(f'TEJ events: {len(events):,} ({int(is_issuance.sum()):,} issuance)')
     return events
@@ -242,7 +253,6 @@ def events_from_mops_strike(
     )
     events = events[after_seed | ~tej_covered]
     events['source'] = 'mops_strike'
-    events['source_rank'] = 3
     print(f'MOPS strike events: {int(after_seed.sum()):,} from {seed_end_date.date()},'
           f' {int((~after_seed & ~tej_covered).sum()):,} earlier for warrants outside TEJ')
     return events
@@ -278,7 +288,6 @@ def events_from_announcements(cache_directory: Path) -> pd.DataFrame:
         'event_type': 'expiry_change',
     })
     events['source'] = 'mops_announcement'
-    events['source_rank'] = 2
     events = events.drop_duplicates(subset=WARRANT_KEY + ['effective_date'], keep='last')
     print(f'announcement expiry events: {len(events):,}')
     return events
@@ -406,7 +415,6 @@ def events_from_dim(
         'event_type': 'issuance',
     })
     events['source'] = 'dim_synthesised'
-    events['source_rank'] = 4
 
     priced = first_priced_event(other_events)
     events = events.merge(priced, on=WARRANT_KEY, how='left')
@@ -519,7 +527,6 @@ def events_from_snapshot_diff(
         'event_type': 'snapshot_diff',
     })
     diff_events['source'] = 'mops_snapshot'
-    diff_events['source_rank'] = 5
     expiry_only_count = int(expiry_only.sum())
     print(f'snapshot diffs no event explained: {len(diff_events):,}'
           f' ({expiry_only_count:,} expiry only;'
@@ -569,7 +576,6 @@ def events_from_target_closure(
         'event_type': 'target_change',
     })
     closure['source'] = 'dim_closure'
-    closure['source_rank'] = 5
     moves = moved.groupby(['known_target_stock_id', 'target_stock_id', 'target_name']).size()
     print(f'underlying closed against the dimension table: {len(closure):,} warrants')
     for (old_code, new_code, new_name), count in moves.items():
@@ -656,7 +662,7 @@ def chain_events(
     #      issuance row and the reset land on the same date. The reset is the
     #      state that actually traded, so a non-issuance row outranks issuance.
     #   2. The same event reaches us from two sources near the seed boundary;
-    #      the lower source_rank (TEJ, then announcements, then MOPS) wins.
+    #      the lower SOURCE_RANK wins.
     events['is_issuance'] = events['event_type'] == 'issuance'
     # na_position: an issuance whose list_date is unknown (see
     # build_basic_info) is undated and must still open the chain.
@@ -822,6 +828,14 @@ def build_history(cache_directory: Path, dim_warrant: pd.DataFrame) -> pd.DataFr
 
     for column in ['exercise_end_date', 'last_trade_date']:
         events[column] = pd.to_datetime(events[column], errors='coerce')
+    unranked = set(events['source']) - SOURCE_RANK.keys()
+    if unranked:
+        raise ValueError(f'sources without a SOURCE_RANK: {sorted(unranked)}')
+    # Next to `source`, where the history has always carried it.
+    events = events.drop(columns='source_rank', errors='ignore')
+    events.insert(
+        events.columns.get_loc('source') + 1, 'source_rank', events['source'].map(SOURCE_RANK).astype(int)
+    )
     return chain_events(events, dim_warrant, scheduled_expiry)
 
 
