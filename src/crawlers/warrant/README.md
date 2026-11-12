@@ -37,8 +37,8 @@ Paths follow the data_sdk convention: `$DATA_SDK_WARRANT_CACHE_PATH`
 (default `/mnt/nfs/backup/tej_warrants`) and `$DATA_SDK_FINMIND_WARRANTS_PATH`
 (default `/mnt/nfs/backup/finmind_warrants`). Every CLI takes `--cache-dir` to
 override. The newest file matching each glob is used, so dropping a fresher
-export is all it takes to extend a seed. The FinMind seed is
-`WarrantInfoWrapper.get_warrant_summary()`'s parquet, copied in and dated.
+export is all it takes to extend a seed. The FinMind seed is a frozen `TaiwanStockInfoWithWarrantSummary` export,
+copied in and dated; the wrapper no longer fetches this summary.
 
 ## Using it
 

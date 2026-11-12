@@ -1,4 +1,3 @@
-import os
 import pandas as pd
 from pathlib import Path
 from typing import Optional
@@ -13,77 +12,14 @@ KNOWN_ISSUERS = [
 ]
 
 class WarrantInfoWrapper:
-    """
-    Fetches Taiwan warrant metadata from FinMind's TaiwanStockInfoWithWarrantSummary.
+    """Read point-in-time warrant terms built by data_sdk.crawlers.warrant.
 
-    Requires FINMIND_API_TOKEN environment variable.
-
-    Usage:
-        w = WarrantInfoWrapper()
-        summary = w.get_warrant_summary()          # all warrants (cached)
+    No API token is required. Use get_warrant_history() for one state per
+    warrant, or get_warrant_terms(frame) to attach terms to dated observations.
     """
 
-    def __init__(self, cache_dir=None):
-        # FinMind login is lazy (only in get_warrant_summary): get_warrant_history
-        # doesn't touch FinMind at all, and shouldn't need FINMIND_API_TOKEN set
-        # or a writable cache_dir just to construct the wrapper.
-        self._api = None
-        # str is accepted as well as Path: the FinMind cache path is built with
-        # `/`, which a str would only fail on much later, inside
-        # get_warrant_summary().
-        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
-        self._summary_cache: Optional[pd.DataFrame] = None
-        self._names_cache: Optional[pd.DataFrame] = None
+    def __init__(self):
         self._history_cache: Optional[pd.DataFrame] = None
-
-    def _finmind_api(self):
-        if self._api is None:
-            from FinMind.data import DataLoader
-            token = os.environ.get("FINMIND_API_TOKEN")
-            if not token:
-                raise EnvironmentError("FINMIND_API_TOKEN is not set")
-            if self._cache_dir is None:
-                raise ValueError("cache_dir is required for get_warrant_summary()")
-            api = DataLoader()
-            api.login_by_token(api_token=token)
-            self._cache_dir.mkdir(parents=True, exist_ok=True)
-            self._api = api
-        return self._api
-
-    def get_warrant_summary(self, refresh: bool = False) -> pd.DataFrame:
-        """
-        Returns TaiwanStockInfoWithWarrantSummary as a DataFrame.
-
-        Known columns (may include more — print .columns to discover):
-          stock_id          (str)   warrant code
-          date              (str)   listing date
-          target_stock_id   (str)   underlying stock code
-          type              (str)   "認購" (call) | "認售" (put)
-          fulfillment_method(str)   e.g. "美式"
-          end_date          (str)   last trading date (YYYY-MM-DD)
-          fulfillment_start_date (str)
-          fulfillment_end_date   (str)
-          exercise_ratio    (float) warrants per share (e.g. 0.119)
-          fulfillment_price (float) strike price
-
-        Result is cached in <cache_dir>/warrant_summary.parquet.
-
-        Known issue: fulfillment_price is 0 for every warrant market-wide, and
-        end_date never updates after e.g. early termination. See
-        get_warrant_history() for the fixed, point-in-time replacement.
-        """
-        cache_path = self._cache_dir / "warrant_summary.parquet"
-        if not refresh and self._summary_cache is not None:
-            return self._summary_cache
-        if not refresh and cache_path.exists():
-            self._summary_cache = pd.read_parquet(cache_path)
-            return self._summary_cache
-
-        df = self._finmind_api().taiwan_stock_info_with_warrant_summary()
-        print(f"[WarrantInfoWrapper] TaiwanStockInfoWithWarrantSummary columns: {df.columns.tolist()}")
-        df.to_parquet(cache_path, index=False)
-        self._summary_cache = df
-        return df
 
     def get_warrant_history(
         self,
@@ -93,8 +29,8 @@ class WarrantInfoWrapper:
     ) -> pd.DataFrame:
         """
         One row per warrant, from data_sdk.crawlers.warrant's built tables
-        (MOPS + TEJ, point-in-time) instead of FinMind — strike/ratio are real
-        (get_warrant_summary()'s are 0), expiry stays current, no token needed.
+        (MOPS + TEJ, point-in-time), with strike, ratio and expiry from the
+        built history. No API token is needed.
         Bull/bear certificates (牛證/熊證) and extendable warrants (展延型)
         are not included.
 
