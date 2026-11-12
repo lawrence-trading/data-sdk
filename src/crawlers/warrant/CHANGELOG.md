@@ -2,7 +2,7 @@
 
 ## 2026-11-12
 
-### Define source precedence in one place
+### Define source precedence in one place (`bb1c60a`)
 
 - Each `events_from_*()` set its own hard-coded `source_rank`, so the full
   same-moment precedence was spread over six functions and the comment in
