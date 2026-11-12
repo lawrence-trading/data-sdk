@@ -21,16 +21,15 @@ Sources, in precedence order on a ``(warrant_id, warrant_name, effective_date)``
 
 | rank | source | covers | why |
 |---|---|---|---|
-| 1 | the TEJ Pro adjustment export | 2020-01-02 .. seed end | The backbone. MOPS's own t95sb02 keeps only a rolling ~18 months, so 95% of historical strike changes exist nowhere else. |
-| 2 | ``mops_raw/warrant_announcement`` | ~2026-01 onward | Expiry changes with their *announcement* date -- the only point-in-time expiry source. |
+| 1 | the TEJ Pro adjustment export | seed window | Historical backbone; MOPS's t95sb02 keeps only a rolling ~18 months. |
+| 2 | ``mops_raw/warrant_announcement`` | captured announcement window | Expiry changes with their *announcement* date -- the only point-in-time expiry source. |
 | 3 | ``mops_raw/warrant_strike_ratio_adjustment`` / ``_reset`` | after seed end | Keeps strike history running once the frozen TEJ seed stops. |
 | 4 | synthesised issuance from the dimension table | warrants absent from TEJ | New listings, and the 2019 cohort predating the TEJ window. |
 | 5 | ``mops_raw/warrant_active_snapshot`` diff | anything the above missed | Today's terms for a warrant whose change fell in a period no event source covers, dated at the crawl. |
 
 **Rows can predate ``list_date``.** The issuance row sits on the issue date,
 2-4 days before listing, and a reset-type warrant's reset lands on or just
-before the listing day (2,646 of 2,692 MOPS resets exactly on ``list_date``,
-the rest up to 3 days earlier; TEJ dates 1,443 of them to the day before).
+before the listing day.
 Both are kept as dated: the reset is the state that traded from day one, and
 the issuance row before it carries the pre-reset strike. Whether a date is
 tradable is the reader's concern -- ``list_date`` is on every row, and
@@ -61,12 +60,9 @@ from .build_basic_info import WARRANT_KEY, add_warrant_key, load_raw_table
 # warrant, so a strike-only event keeps the expiry it inherited and vice versa.
 #
 # The underlying is a state too: a share conversion or merger moves every
-# live warrant on it to the new code (中光電 5371 -> 中光電投控 3718 on
-# 2026-09-03), and a join to the underlying's quotes before that day needs
-# the old code. It follows the same sourcing as the strike: each TEJ row
-# carries the underlying as of that event (勝麗 6238 becomes 同欣電 6271 on
-# the 2020-06-19 row), MOPS's t95sb02/t95sb03 rows after the seed carry the
-# underlying as MOPS listed it when crawled (a conversion posts a row for
+# live warrant on it to the new code; earlier quote joins need the old code.
+# Each TEJ row carries the underlying as of that event. MOPS's t95sb02/t95sb03
+# rows after the seed carry the underlying as MOPS listed it when crawled (a conversion posts a row for
 # every live warrant on its effective day), and whatever the chain then
 # still disagrees with the dimension table on is closed by a
 # ``target_change`` row (see :func:`events_from_target_closure`).
@@ -134,7 +130,7 @@ def events_from_tej(tej_adjustment_path: Path, dim_warrant: pd.DataFrame) -> pd.
 
     Dates are kept as TEJ records them: the ``上市櫃`` row on the *issue*
     date (2-4 days before listing) and a reset on the day it took effect,
-    which for 1,443 warrants is the day before listing. Both are real states
+    which can precede listing. Both are real states
     -- the issue-time strike, then the reset one that traded from day one --
     and whether a date is tradable is the reader's concern (``list_date`` is
     on every row). TEJ labels every strike move ``重設`` regardless of whether
@@ -255,12 +251,8 @@ def events_from_announcements(cache_directory: Path) -> pd.DataFrame:
 
     announcements = add_warrant_key(announcements, 'warrant_id', 'warrant_name')
     announcements = announcements[announcements['announced_expiry_date'].notna()]
-    # Early terminations only. Their document names were checked against TEJ and
-    # the embedded date is always the new expiry. Extension documents use the
-    # same field for something else -- 03029X's 2026-09-07 extension names
-    # 2026-03-04, six months in the past -- so they are left out rather than
-    # guessed at. Extensions affect only the 43 extendable warrants, which are
-    # excluded from studies anyway.
+    # Only early-termination filenames encode the new expiry. Extension
+    # documents use the same field for a different purpose and are excluded.
     announcements = announcements[announcements['announcement_type'] == 'early_termination']
 
     # The announcement names the new expiry but not the new last trading day.
@@ -297,7 +289,7 @@ def scheduled_expiry_dates(cache_directory: Path, dim_warrant: pd.DataFrame) -> 
     taken from the warrant's own actual pair.
 
     Falls back to the dimension table's current dates where TEJ has no row --
-    correct for every warrant that was never rescheduled, which is 99% of them.
+    correct for warrants that were never rescheduled.
     """
     fallback = dim_warrant[WARRANT_KEY + ['exercise_end_date', 'last_trade_date']].rename(
         columns={
@@ -318,17 +310,10 @@ def scheduled_expiry_dates(cache_directory: Path, dim_warrant: pd.DataFrame) -> 
     tej = add_warrant_key(tej, '權證代號', '權證名')
     tej = tej.drop_duplicates(subset=WARRANT_KEY, keep='first')
 
-    # 預定最後交易日 is not reliable to the day: on ~6,800 warrants it sits 1-7
-    # days off the actual last trading day with no termination involved (the
-    # shifts cluster on market closures -- 2025-10-22, 2026-02-10 -- and TEJ's
-    # own schedule arithmetic), and taking it literally put 0.9% of live
-    # warrants one day off the exchange's expiry. A real early termination
-    # moves the date by weeks, and those cluster per underlying event (the 35
-    # warrants all ending 2026-08-20 on a 2026-09-11 schedule), so only a
-    # shift beyond a week is treated as a reschedule; otherwise the actual
-    # dates are the schedule.
-    # ponytail: 7-day cut-off; use the announcement table to classify if a
-    # termination inside a week ever matters.
+    # 預定最後交易日 can differ from the actual last trading day due to
+    # closures or schedule arithmetic. Treat only shifts beyond a week as
+    # reschedules; otherwise use actual dates as the schedule.
+    # Limitation: detecting a termination within a week requires announcements.
     settlement_gap = tej['到期日'] - tej['最後交易日']
     is_rescheduled = (tej['最後交易日'] - tej['預定最後交易日']).dt.days < -7
     scheduled_last_trade_date = tej['預定最後交易日'].where(is_rescheduled, tej['最後交易日'])
@@ -438,7 +423,7 @@ def events_from_dim(
 
 
 # TODO: MOPS's t90sb01 applies an ex-dividend adjustment a day before it takes
-# effect, so a diff dated at the crawl is a day early (德微, 2026-09-14). Plan:
+# effect, so a diff dated at the crawl is a day early. Plan:
 # a daily TWSE/TPEx OpenAPI snapshot resource as the diff's reference (the
 # exchange applies on the ex-date), plus t95sb02's future-effective rows for
 # the true dates; MOPS's snapshot becomes verify's reference instead.
@@ -450,10 +435,8 @@ def events_from_snapshot_diff(
 ) -> pd.DataFrame:
     """Close the gap between the last known event and what MOPS reports today.
 
-    A warrant whose strike moved in a period no event source covers -- most of
-    all the extendable warrants listed before 2020 and still alive, whose only
-    event is a synthesised issuance from years ago -- would otherwise carry a
-    stale strike right up to its current row. The snapshot knows today's terms
+    A warrant whose strike moved in a period no event source covers would
+    otherwise carry a stale strike right up to its current row. The snapshot knows today's terms
     but not when they changed, so the event is dated at the crawl: the change is
     recorded no later than it actually happened, and never invented earlier.
     """
@@ -554,8 +537,7 @@ def events_from_target_closure(
     conversion between the seed's end and the first crawl -- and this
     records it no later than it happened: at the crawl for a live warrant,
     at expiry for an expired one, exactly as
-    :func:`events_from_snapshot_diff` dates a strike. None was needed on
-    the 2026-11-03 build.
+    :func:`events_from_snapshot_diff` dates a strike.
     """
     ordered = events.dropna(subset=['effective_date']).sort_values(WARRANT_KEY + ['effective_date', 'sequence'])
     last_known = (
@@ -606,10 +588,8 @@ def trading_days_before(dates: pd.Series, days: int) -> pd.Series:
 
     The calendar is FinMind's ``TaiwanStockTradingDate``, which the exchange
     publishes for the whole year ahead -- plain business days miss the
-    holidays, and a termination expiring 2026-09-30 got 09-28 (教師節) as its
-    last trading day instead of 09-24, with 09-25 (中秋) between them. Dates
-    the calendar does not reach (next year's before it is published) and any
-    failure to fetch it fall back to business days.
+    holidays. Dates the calendar does not reach (next year's before it is
+    published) and any failure to fetch it fall back to business days.
     """
     business_days = dates - days * pd.offsets.BDay()
     if dates.empty:
@@ -708,9 +688,8 @@ def chain_events(
     # forward-filled from before the change and can now sit after expiry. MOPS
     # publishes the new last trading day with the termination (the dimension
     # table holds it), so that is taken where the dimension's expiry is the
-    # same one. Otherwise it is two trading days before the new expiry (every
-    # one of the 60 checked against the exchange). Where both exist they are
-    # compared, as a check on the calendar rule.
+    # same one. Otherwise use two trading days before the new expiry.
+    # Where both exist, compare them as a check on the calendar rule.
     last_trade_date_is_stale = events['last_trade_date'] > events['exercise_end_date']
     stale = events.loc[last_trade_date_is_stale, WARRANT_KEY + ['exercise_end_date']]
     published = stale.merge(
@@ -794,12 +773,8 @@ def build_history(cache_directory: Path, dim_warrant: pd.DataFrame) -> pd.DataFr
     if tej_adjustment_path is not None:
         print(f'TEJ seed: {tej_adjustment_path}')
         tej_events = events_from_tej(tej_adjustment_path, dim_warrant)
-        # The seed's end is the last day TEJ actually recorded events on --
-        # taken from the raw 年月日, not from the events, whose issuance rows
-        # have been re-dated to list_date and can sit a few days later. Using
-        # the re-dated maximum once put the end at 09-02 when TEJ stopped on
-        # 09-01, and every MOPS adjustment effective 09-02 (989 of them) was
-        # dropped as "covered by TEJ".
+        # Use the maximum raw TEJ date as the coverage boundary. Transformed
+        # event dates can extend past raw coverage and suppress MOPS events.
         seed_end_date = pd.to_datetime(
             pd.read_parquet(tej_adjustment_path, columns=['年月日'])['年月日']
         ).max()
@@ -820,10 +795,8 @@ def build_history(cache_directory: Path, dim_warrant: pd.DataFrame) -> pd.DataFr
 
     # Only an issuance event covers a warrant. A change or a reset describes a
     # state the warrant moved to, not the one it was issued with, so without a
-    # synthesised issuance a warrant whose first known event is one of those --
-    # 2,011 whose first TEJ row is already a change, a listing-day reset on a
-    # warrant that listed after the TEJ seed ended -- would have no terms at
-    # all before it.
+    # synthesised issuance, warrants starting with a change or reset would
+    # have no terms before that event.
     is_issuance = events['event_type'] == 'issuance'
     covered_keys = set(zip(events.loc[is_issuance, 'warrant_id'], events.loc[is_issuance, 'warrant_name']))
     events = pd.concat([events, events_from_dim(dim_warrant, covered_keys, events)], ignore_index=True)

@@ -40,10 +40,8 @@ def patch_dlt_rmtree_for_nfs(
     with no retry. On the NFS mount holding the cache dir (``fsc`` on) a file
     closed moments earlier is silly-renamed to ``.nfs*`` at unlink time and
     the rmtree fails -- ``ENOTEMPTY`` on the directory, or ``EBUSY`` when it
-    reaches the ``.nfs*`` entry itself. The entry clears on its own: ~15 ms
-    on an idle box, but measured at 1-30 s while other jobs hammer the same
-    mount (load average in the hundreds). Hence the long backoff, ~64 s in
-    total; a cron job deleting a handful of packages can afford it.
+    reaches the ``.nfs*`` entry itself. These entries clear asynchronously;
+    the default backoff allows ~64 seconds for cleanup under load.
 
     ``FileStorage.delete_folder`` is the one exit every ``delete_package``
     call goes through, so patching it covers all of them. Remove once dlt

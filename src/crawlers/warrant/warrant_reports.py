@@ -54,7 +54,7 @@ MARKET_CODES = ((1, 'twse'), (2, 'otc'))
 RESULT_PAGE_SIZE = 1000            # MOPS returns 1000 rows/page; a short page is the last one
 PENDING_ADJUSTMENT_WINDOW_DAYS = 45  # how far ahead to read not-yet-effective t95sb02 rows
 # Each event report is published twice, once per market; both must be read or
-# every OTC warrant's strike history is missing (it was, until 2026-09-15).
+# every OTC warrant's strike history is missing.
 ADJUSTMENT_ENDPOINTS = ('ajax_t95sb02', 'ajax_o_t95sb02')
 RESET_ENDPOINTS = ('ajax_t95sb03', 'ajax_o_t95sb03')
 MAX_RESULT_PAGES = 1000            # pagination safety cap (a busy year is ~55 pages)
@@ -625,9 +625,8 @@ def pending_adjustment_resource(
     An ex-dividend adjustment is published days ahead of the date it takes
     effect, and ``t90sb01``'s snapshot applies it a day early -- so without
     these rows the history learns of the change only from a snapshot diff
-    dated at the crawl, a day before it is true (1,416 TSMC warrants on
-    2026-09-15, the eve of its ex-dividend). They carry their own 生效日, so
-    the history gets the real date.
+    dated at the crawl, a day before it is true. These rows carry their own
+    生效日, so the history gets the real date.
 
     Kept out of :func:`strike_ratio_adjustment_resource` because its cursor
     would advance past today and then block every later run. This table is
@@ -745,7 +744,7 @@ ANNOUNCEMENT_COLUMNS = [
     'warrant_name',         # 權證名稱
     'document_name',        # 公告稿 — '<issuer>-<new expiry>-<announced>-<time>-<seq>.doc'
 ]
-# MOPS keeps only a rolling ~8 months of t95sb01 (earliest observed 115/01/28),
+# MOPS keeps only a rolling ~8 months of t95sb01,
 # so this is a going-forward capture: history before the window is unrecoverable.
 ANNOUNCEMENT_EARLIEST_DATE = datetime.date(2026, 1, 1)
 ANNOUNCEMENT_ENDPOINTS = (('ajax_t95sb01', 'twse'), ('ajax_o_t95sb01', 'otc'))
@@ -754,9 +753,8 @@ ANNOUNCEMENT_ENDPOINTS = (('ajax_t95sb01', 'twse'), ('ajax_o_t95sb01', 'otc'))
 def parse_announced_expiry_date(document_name: str) -> pd.Timestamp:
     """New 到期日 out of a 公告稿 filename, or NaT.
 
-    ``7790-20260810-20260805-141118-9.doc`` -> 2026-08-10. Verified against TEJ:
-    the second field matches the post-termination 到期日 exactly. Unlike every
-    other MOPS date these are already Gregorian, not ROC.
+    ``7790-20260810-20260805-141118-9.doc`` -> 2026-08-10. The second field
+    encodes the new expiry in Gregorian format, not ROC.
     """
     parts = str(document_name).split('-')
     if len(parts) < 3:

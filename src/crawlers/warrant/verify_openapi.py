@@ -56,9 +56,8 @@ def parse_republic_yyyymmdd(raw_value: object) -> pd.Timestamp:
 def fetch_json_with_resume(url: str, max_requests: int = 30) -> list:
     """GET a large JSON body from a server that drops the connection mid-body.
 
-    TPEx's OpenAPI answers 200 with the full Content-Length and then closes
-    after a few hundred KB on most requests (2 of 3 on 2026-09-14). It does
-    honour Range, so the body is collected in pieces: each retry asks for
+    TPEx's OpenAPI can close a response before the declared Content-Length.
+    It honours Range, so the body is collected in pieces: each retry asks for
     ``bytes=<received>-`` until the declared length is in hand, then the JSON
     is parsed as the real completeness check.
     """

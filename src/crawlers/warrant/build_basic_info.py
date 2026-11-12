@@ -4,24 +4,16 @@ One row per warrant, holding the attributes that do not change over its life
 plus its *current* terms. Point-in-time strike/ratio/expiry live in
 ``warrant_history.parquet`` instead (see :mod:`build_history`).
 
-Three sources, in precedence order per field:
+Sources, in precedence order per field:
 
-1. ``mops_raw/warrant_basic_info`` -- the base population and every issuance-time
-   field (``original_strike``, ``issuer``, ``target_stock_id``, ...).
-2. ``mops_raw/warrant_active_snapshot`` -- supplies every live warrant (the
-   basic-info resource records a warrant only once it has expired) and
-   overwrites the *mutable* term fields (``exercise_end_date``,
-   ``last_trade_date``, ``latest_*``) and the underlying (``target_stock_id``,
-   ``target_name``, which a share conversion or merger moves -- 中光電 5371 ->
-   中光電投控 3718 on 2026-09-03) of anything it covers. The snapshot has no
-   cursor and is replaced whole every run, so it always reflects MOPS today.
-3. the TEJ Pro export (``$DATA_SDK_TEJ_WARRANTS_PATH``) -- repairs ``list_date`` /
-   ``exercise_start_date``, which MOPS itself serves corrupted (~51,500 rows,
-   nearly all OTC warrants expired 2011-2019, with both set to the literal
-   2023-12-26; confirmed by live-replaying the MOPS query).
+1. ``mops_raw/warrant_basic_info`` -- the base population and issuance-time fields.
+2. ``mops_raw/warrant_active_snapshot`` -- supplies live warrants and refreshes
+   mutable terms, including ``target_stock_id`` and ``target_name`` after a
+   share conversion or merger. It is replaced whole every run.
+3. the TEJ Pro export (``$DATA_SDK_TEJ_WARRANTS_PATH``) -- repairs ``list_date``
+   and ``exercise_start_date``.
 4. a frozen FinMind warrant summary (``$DATA_SDK_FINMIND_WARRANTS_PATH``) --
-   the same repair for the ~48,700 corrupted rows that predate TEJ's window.
-   What neither covers is left null rather than wrong.
+   repairs invalid dates outside TEJ's coverage. Unrepairable dates stay null.
 
 The key is ``(warrant_id, warrant_name)`` with ``warrant_id`` stripped of its
 recycling suffix. It is what joins to TEJ too: ``exercise_end_date`` shifts on
@@ -49,9 +41,8 @@ from . import (
 )
 
 #: Primary key. ``warrant_id`` is the listing code (6 characters; 4 digits
-#: before 2005) with any recycling suffix stripped; it is NOT unique on its own (MOPS reuses a code
-#: once the previous warrant expires -- ``030001`` has been three different
-#: warrants), so the name is part of the key.
+#: before 2005) with any recycling suffix stripped. MOPS reuses expired codes,
+#: so the name is also required to identify a warrant.
 WARRANT_KEY = ['warrant_id', 'warrant_name']
 
 #: The literal date MOPS serves in place of the real list_date /
@@ -67,8 +58,7 @@ DATE_COLUMNS = [
 # Fields the snapshot is allowed to overwrite: everything that can change after
 # issuance. original_* and the identity columns are deliberately not here.
 # The underlying is mutable too: a share conversion or merger moves every
-# live warrant on it to the new code (中光電 5371 -> 中光電投控 3718, 精星 8183
-# -> 精成科 6191, 三商壽 2867 -> 玉山金 2884, all in 2026), and MOPS updates
+# live warrant on it to the new code. MOPS updates
 # only the live ones -- an expired warrant keeps the underlying it expired on,
 # which is what the basic-info sweep records. So after the overlay every row
 # carries the underlying of MOPS's latest record of it; the point-in-time
@@ -93,7 +83,7 @@ def load_raw_table(cache_directory: Path, table_name: str) -> pd.DataFrame | Non
         return None
     frame = pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
     frame = frame.drop(columns=[column for column in frame.columns if column.startswith('_dlt_')])
-    # Crawls before 2026-09 stored a blank cell as the text 'nan'.
+    # Normalize legacy string nulls.
     frame = frame.replace({'nan': None})
     for column in frame.columns:
         if column.endswith('_date'):
@@ -206,15 +196,10 @@ def impute_dates_from_tej(basic: pd.DataFrame, tej_basic: pd.DataFrame) -> pd.Da
 def impute_dates_from_finmind(basic: pd.DataFrame, finmind: pd.DataFrame) -> pd.DataFrame:
     """Second repair pass for ``list_date``, for warrants TEJ does not cover.
 
-    The corrupted MOPS rows are almost all OTC warrants that expired before
-    2020 (48,739 of the 51,537 are OTC), and TEJ's export starts in 2019.
-    FinMind's warrant summary lists them from 2011 with a listing date. Rows
-    are matched on the code plus the last trading day -- FinMind's
-    ``end_date`` is the last trading day on TWSE rows but the expiry on OTC
-    rows, so both are tried. On the 19,687 warrants all three sources share,
-    FinMind agrees with TEJ to the day 97.7% of the time and within 3 days
-    99.9%, so it ranks below TEJ and is only applied where the MOPS date is
-    still visibly wrong (after the last trading day).
+    Match the code plus the last trading day: FinMind's ``end_date`` is
+    the last trading day on TWSE rows but the expiry on OTC rows, so both
+    are tried. FinMind ranks below TEJ and is applied only where the MOPS
+    date is still visibly wrong (after the last trading day).
 
     Whatever stays unrepaired is nulled afterwards (:func:`null_unrepaired_dates`);
     downstream as-of logic treats null as "not yet listed".
@@ -303,10 +288,9 @@ def build_dim_warrant(cache_directory: Path) -> pd.DataFrame:
     # Bull/bear certificates (牛證/熊證) behave differently and TEJ never covers
     # them, so downstream studies exclude them -- flag rather than drop.
     basic['is_bull_bear'] = basic['warrant_name'].str.contains('牛|熊', regex=True, na=False)
-    # Extendable warrants (展延型): 104 warrants, 2014-2019, named ``<series>展NN``
-    # (元展06, 富展01, 永豐金元大61展01). 大展證券's 2005-08 plain warrants share
-    # the suffix (大展01) and are told apart by issuer. Also excluded from
-    # the history: their maturity moves by extension, which is not modelled.
+    # Extendable warrants use a <series>展NN suffix; exclude issuer 大展,
+    # whose plain warrants also use it. Extensions are not modelled, so
+    # extendable warrants are excluded from the history.
     ends_in_extension_series = basic['warrant_name'].str.contains(r'展\d{2}$', regex=True, na=False)
     basic['is_extendable'] = ends_in_extension_series & (basic['issuer'] != '大展')
 
@@ -314,8 +298,7 @@ def build_dim_warrant(cache_directory: Path) -> pd.DataFrame:
     # has no such column, the exchange OpenAPI has none either, and TEJ's
     # 權證類型 / t95sb02's exercise_method only cover part of the universe. It is
     # implied by the dates instead -- an American warrant can be exercised from
-    # its first trading day, a European one only at maturity. Checked against
-    # TEJ's 權證類型 on all 418,527 warrants both sources share: no exceptions.
+    # its first trading day, a European one only at maturity.
     # Nullable: unknown where either date could not be repaired.
     both_dates_known = basic['exercise_start_date'].notna() & basic['list_date'].notna()
     basic['is_american'] = (basic['exercise_start_date'] == basic['list_date']).where(both_dates_known).astype('boolean')
