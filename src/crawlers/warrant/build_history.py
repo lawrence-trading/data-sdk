@@ -125,7 +125,7 @@ def tej_underlying_codes(tej: pd.DataFrame, dim_warrant: pd.DataFrame) -> pd.Ser
     return codes.where(~is_token, codes.map(token_map).fillna(codes))
 
 
-def events_from_tej(tej_adjustment_path: Path, dim_warrant: pd.DataFrame) -> pd.DataFrame:
+def events_from_tej(tej: pd.DataFrame, dim_warrant: pd.DataFrame) -> pd.DataFrame:
     """TEJ's per-state rows -> events (rank 1).
 
     Dates are kept as TEJ records them: the ``上市櫃`` row on the *issue*
@@ -137,11 +137,6 @@ def events_from_tej(tej_adjustment_path: Path, dim_warrant: pd.DataFrame) -> pd.
     it was a genuine reset or an ex-rights adjustment, so the label is mapped
     to a neutral ``change`` rather than pretending to know which.
     """
-    tej = pd.read_parquet(
-        tej_adjustment_path,
-        columns=['權證代號', '權證簡稱', '年月日', '序號', '事件說明', '履約價(元)', '行使比例', '標的代號', '標的簡稱'],
-    )
-    tej['年月日'] = pd.to_datetime(tej['年月日'])
     tej = add_warrant_key(tej, '權證代號', '權證簡稱')
     tej['target_stock_id'] = tej_underlying_codes(tej, dim_warrant)
 
@@ -771,13 +766,15 @@ def build_history(cache_directory: Path, dim_warrant: pd.DataFrame) -> pd.DataFr
 
     if tej_adjustment_path is not None:
         print(f'TEJ seed: {tej_adjustment_path}')
-        tej_events = events_from_tej(tej_adjustment_path, dim_warrant)
-        # Use the maximum raw TEJ date as the coverage boundary. Transformed
-        # event dates can extend past raw coverage and suppress MOPS events.
-        seed_end_date = pd.to_datetime(
-            pd.read_parquet(tej_adjustment_path, columns=['年月日'])['年月日']
-        ).max()
-        frames.append(tej_events)
+        tej = pd.read_parquet(
+            tej_adjustment_path,
+            columns=['權證代號', '權證簡稱', '年月日', '序號', '事件說明', '履約價(元)', '行使比例', '標的代號', '標的簡稱'],
+        )
+        tej['年月日'] = pd.to_datetime(tej['年月日'])
+        # Coverage ends at the raw TEJ date, not a transformed event date:
+        # those can run past raw coverage and suppress MOPS events.
+        seed_end_date = tej['年月日'].max()
+        frames.append(events_from_tej(tej, dim_warrant))
         print(f'TEJ seed ends {seed_end_date.date()}')
     else:
         print(f'WARNING: no {TEJ_ADJUSTMENT_GLOB} in the TEJ seed dir'

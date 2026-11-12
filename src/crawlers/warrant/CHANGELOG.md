@@ -2,6 +2,13 @@
 
 ## 2026-11-12
 
+### Read the TEJ adjustment seed once
+
+- `build_history()` now reads the TEJ adjustment parquet once, takes the
+  seed end date from its raw `年月日`, and passes the frame to
+  `events_from_tej()`. Previously the file was read a second time just to
+  obtain that date.
+
 ### Reuse the snapshot within a history build
 
 - Read `warrant_active_snapshot` once in `build_history()` and share its
