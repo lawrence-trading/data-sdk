@@ -1,5 +1,28 @@
 # Warrant crawler TODO
 
+## Align directory defaults with the other SDK components
+
+Make warrant directory resolution follow the same rules as
+`finmind_broker_wrapper` and the shared `env_path()` helper:
+
+- Explicit directory arguments take precedence.
+- Otherwise read `DATA_SDK_WARRANT_CACHE_PATH`, `DATA_SDK_TEJ_WARRANTS_PATH`,
+  or `DATA_SDK_FINMIND_WARRANTS_PATH`, as appropriate.
+- An unset or empty environment variable falls back to the current working
+  directory and prints a warning to stderr; remove the built-in NFS defaults.
+
+Keep the existing warrant directory functions as the public interface. Move
+the shared path helper to the package root so crawlers and wrappers can use
+it, updating existing imports without changing other wrappers' behavior.
+Remove the duplicate NFS fallback in `update.sh`: forward `--cache-dir` only
+when explicitly supplied, otherwise let Python resolve the environment.
+Update CLI help and documentation to match.
+
+Before rollout, confirm scheduled jobs explicitly set all three directory
+variables to their existing NFS locations. Verify explicit overrides, set,
+unset and empty environment variables, and existing wrapper imports; no
+crawl or history rebuild is needed for this change.
+
 ## Redesign same-day event resolution (`sequence` / `source_rank`)
 
 Today a warrant can carry several events on one date, and two columns decide
