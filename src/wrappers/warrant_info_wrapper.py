@@ -22,8 +22,8 @@ class WarrantInfoWrapper:
         self._history_cache: Optional[pd.DataFrame] = None
 
     @staticmethod
-    def warrant_cache_dir():
-        return str(env_path("DATA_SDK_WARRANT_CACHE_PATH"))
+    def warrant_history_dir():
+        return str(env_path("DATA_SDK_WARRANT_HISTORY_PATH"))
 
     def get_warrant_history(
         self,
@@ -72,17 +72,17 @@ class WarrantInfoWrapper:
         row means not yet listed, already expired, or list_date unknown.
 
         Reads <cache_dir>/warrant_history.parquet (default
-        $DATA_SDK_WARRANT_CACHE_PATH). Built and refreshed by
+        $DATA_SDK_WARRANT_HISTORY_PATH). Built and refreshed by
         data-crawlers' `warrant/update.sh`.
         """
-        resolved_cache_dir = Path(cache_dir if cache_dir is not None else self.warrant_cache_dir())
+        resolved_cache_dir = Path(cache_dir if cache_dir is not None else self.warrant_history_dir())
         if refresh or self._history_cache is None or getattr(self, "_history_cache_dir", None) != resolved_cache_dir:
             path = resolved_cache_dir / "warrant_history.parquet"
             if not path.exists():
                 raise FileNotFoundError(
                     f"{path} does not exist -- build it with data-crawlers' "
                     "`warrant/update.sh`, or point cache_dir / "
-                    "DATA_SDK_WARRANT_CACHE_PATH at an existing build"
+                    "DATA_SDK_WARRANT_HISTORY_PATH at an existing build"
                 )
             self._history_cache = pd.read_parquet(path)
             self._history_cache_dir = resolved_cache_dir

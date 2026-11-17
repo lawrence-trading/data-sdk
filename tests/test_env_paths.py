@@ -17,7 +17,7 @@ ACCESSORS = [
     ("DATA_SDK_FINMIND_BROKER_WARRANT_PATH", FinMindWrapper.warrant_broker_dir),
     ("DATA_SDK_SHIOAJI_TICKS_PATH", ShioajiWrapper.ticks_dir),
     ("DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH", ShioajiWrapper.futures_ticks_dir),
-    ("DATA_SDK_WARRANT_CACHE_PATH", WarrantInfoWrapper.warrant_cache_dir),
+    ("DATA_SDK_WARRANT_HISTORY_PATH", WarrantInfoWrapper.warrant_history_dir),
 ]
 
 
