@@ -7,6 +7,7 @@ from data_sdk.wrappers import fop_wrapper, order_book_wrapper
 from data_sdk.wrappers.finmind_broker_wrapper import FinMindWrapper
 from data_sdk.wrappers.shioaji_wrapper import ShioajiWrapper
 from data_sdk.wrappers.tej_wrapper import TEJWrapper
+from data_sdk.wrappers.warrant_info_wrapper import WarrantInfoWrapper
 
 ACCESSORS = [
     ("DATA_SDK_ORDER_BOOK_PARQUET_PATH", order_book_wrapper._order_book_base_path),
@@ -16,6 +17,7 @@ ACCESSORS = [
     ("DATA_SDK_FINMIND_BROKER_WARRANT_PATH", FinMindWrapper.warrant_broker_dir),
     ("DATA_SDK_SHIOAJI_TICKS_PATH", ShioajiWrapper.ticks_dir),
     ("DATA_SDK_SHIOAJI_FUTURES_TICKS_PATH", ShioajiWrapper.futures_ticks_dir),
+    ("DATA_SDK_WARRANT_HISTORY_PATH", WarrantInfoWrapper.warrant_history_dir),
 ]
 
 

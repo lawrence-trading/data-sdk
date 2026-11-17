@@ -5,3 +5,5 @@ polars
 FinMind
 shioaji>=1.7
 requests
+tejapi
+pyarrow
