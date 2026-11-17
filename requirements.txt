@@ -6,7 +6,4 @@ FinMind
 shioaji
 requests
 tejapi
-dlt
-beautifulsoup4
-lxml
 pyarrow

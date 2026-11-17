@@ -6,7 +6,6 @@ setup(
     packages=[
         "data_sdk",
         "data_sdk.crawlers",
-        "data_sdk.crawlers.warrant",
         "data_sdk.wrappers",
     ],
     package_dir={"data_sdk": "src"},
@@ -19,10 +18,6 @@ setup(
         "shioaji",
         "requests",
         "tejapi",
-        # data_sdk.crawlers.warrant
-        "dlt",
-        "beautifulsoup4",
-        "lxml",
         "pyarrow",
     ],
     author="User",

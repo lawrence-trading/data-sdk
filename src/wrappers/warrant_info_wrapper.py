@@ -2,7 +2,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional
 
-from ..crawlers.warrant import cache_directory as warrant_cache_directory
+from .paths import env_path
 
 
 KNOWN_ISSUERS = [
@@ -12,7 +12,7 @@ KNOWN_ISSUERS = [
 ]
 
 class WarrantInfoWrapper:
-    """Read point-in-time warrant terms built by data_sdk.crawlers.warrant.
+    """Read point-in-time warrant terms built by data-crawlers' warrant package.
 
     No API token is required. Use get_warrant_history() for one state per
     warrant, or get_warrant_terms(frame) to attach terms to dated observations.
@@ -21,6 +21,10 @@ class WarrantInfoWrapper:
     def __init__(self):
         self._history_cache: Optional[pd.DataFrame] = None
 
+    @staticmethod
+    def warrant_cache_dir():
+        return str(env_path("DATA_SDK_WARRANT_CACHE_PATH"))
+
     def get_warrant_history(
         self,
         as_of: Optional[str] = None,
@@ -28,7 +32,7 @@ class WarrantInfoWrapper:
         refresh: bool = False,
     ) -> pd.DataFrame:
         """
-        One row per warrant, from data_sdk.crawlers.warrant's built tables
+        One row per warrant, from data-crawlers' warrant tables
         (MOPS + TEJ, point-in-time), with strike, ratio and expiry from the
         built history. No API token is needed.
         Bull/bear certificates (牛證/熊證) and extendable warrants (展延型)
@@ -68,17 +72,17 @@ class WarrantInfoWrapper:
         row means not yet listed, already expired, or list_date unknown.
 
         Reads <cache_dir>/warrant_history.parquet (default
-        $DATA_SDK_WARRANT_CACHE_PATH). Refresh with
-        `python -m data_sdk.crawlers.warrant.update`.
+        $DATA_SDK_WARRANT_CACHE_PATH). Built and refreshed by
+        data-crawlers' `warrant/update.sh`.
         """
-        resolved_cache_dir = warrant_cache_directory(cache_dir)
+        resolved_cache_dir = Path(cache_dir if cache_dir is not None else self.warrant_cache_dir())
         if refresh or self._history_cache is None or getattr(self, "_history_cache_dir", None) != resolved_cache_dir:
             path = resolved_cache_dir / "warrant_history.parquet"
             if not path.exists():
                 raise FileNotFoundError(
-                    f"{path} does not exist -- run "
-                    "`python -m data_sdk.crawlers.warrant.update` (or point "
-                    "cache_dir / DATA_SDK_WARRANT_CACHE_PATH at an existing build)"
+                    f"{path} does not exist -- build it with data-crawlers' "
+                    "`warrant/update.sh`, or point cache_dir / "
+                    "DATA_SDK_WARRANT_CACHE_PATH at an existing build"
                 )
             self._history_cache = pd.read_parquet(path)
             self._history_cache_dir = resolved_cache_dir
