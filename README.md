@@ -93,6 +93,7 @@ export DATA_SDK_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/parquets"
 export DATA_SDK_TEJ_ORDER_BOOK_PARQUET_PATH="/mnt/nfs/backup/tej_parquets"
 export DATA_SDK_TEJ_CACHE_PATH="/mnt/nfs/backup/tej_cache"
 export DATA_SDK_FOP_PARQUET_PATH="/mnt/nfs/backup/fop_parquets"
+export DATA_SDK_VIX_PARQUET_PATH="/mnt/nfs/backup/taifex_vix/parquet"
 export DATA_SDK_WARRANT_HISTORY_PATH="/mnt/nfs/backup/warrant_history"
 ```
 
@@ -184,6 +185,19 @@ df_ob_tej = get_order_book_stocks("2021-06-29", is_twse=True, mode="tej")       
 df_odd = get_order_book_odd_lots("2026-01-02", is_twse=True, sid="2330")
 df_warrant = get_order_book_warrant("2026-01-02", is_twse=True)           # all warrants
 df_w_sid   = get_order_book_warrant("2026-01-02", is_twse=True, sid="700339")  # single warrant
+```
+
+### Intraday VIX
+
+Set `DATA_SDK_VIX_PARQUET_PATH` to the TAIFEX daily parquet directory and
+`FINMIND_API_TOKEN` for FinMind access. Both dates are inclusive.
+
+```python
+from data_sdk import VixWrapper
+
+vix = VixWrapper()
+df = vix.get_vix("2026-02-26", "2026-03-02")
+finmind_df = vix.get_vix_finmind("2026-03-02", "2026-03-02")
 ```
 
 ### TAIFEX futures/options (FOP) parquet
